@@ -2,7 +2,7 @@
 
 ## Архитектура
 
-Приложение использует Tauri 2 и поставляет sing-box как sidecar. Рабочий режим — локальный mixed HTTP/SOCKS proxy на `127.0.0.1:2080`; при успешном запуске sing-box сам включает системный proxy Windows. Перед отображением статуса «Подключено» native-команда проверяет, что локальный порт действительно поднялся.
+Приложение использует Tauri 2 и поставляет sing-box как sidecar. Основной режим — TUN-интерфейс Windows с `auto_route`, `strict_route`, DNS hijack и MTU 1500. Альтернативный режим — локальный mixed HTTP/SOCKS proxy на `127.0.0.1:2080`. Перед отображением статуса «Подключено» приложение выполняет реальный запрос определения внешнего IP.
 
 ## Поддерживаемый импорт
 
@@ -26,4 +26,4 @@ pnpm tauri icon src-tauri/icons/potato-mark.svg
 pnpm desktop:build
 ```
 
-GitHub Actions собирает Windows x64 installer и запускает frontend/Rust/Tauri build checks. В текущем этапе TUN намеренно не включён: рабочий сценарий — proxy, как в HAPP на компьютере пользователя.
+GitHub Actions собирает Windows x64 installer и запускает frontend/Rust/Tauri build checks. TUN требует подтверждения UAC. Если на конкретном компьютере TUN не создаётся, приложение должно показать ошибку; для диагностики используйте `diagnostics/windows-network-check.ps1`.

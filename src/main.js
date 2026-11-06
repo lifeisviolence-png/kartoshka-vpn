@@ -20,6 +20,8 @@ const state = {
   connection: 'idle',
   connectedAt: null,
   routeMode: localStorage.getItem('kartoshka.routeMode') || 'split',
+  transportMode: localStorage.getItem('kartoshka.transportMode') || 'tun',
+  externalIp: null,
   activeNav: 'servers',
   modal: null,
   search: '',
@@ -79,11 +81,11 @@ function render() {
             <div class="server-list">${nodes.length ? nodes.map((item) => serverCard(item)).join('') : `<div class="list-empty"><div class="empty-orb">＋</div><strong>${state.servers.length ? 'Ничего не найдено' : 'Список серверов пуст'}</strong><span>${state.servers.length ? 'Попробуйте изменить поиск' : 'Нажмите «Добавить» и вставьте ссылку'}</span></div>`}</div>
           </section>
           <section class="control-column">
-            <div class="control-top"><span class="proxy-select">Прокси <b>⌄</b></span><span class="connection-badge ${statusClass}"><i></i>${statusLabel}</span></div>
+            <div class="control-top"><button class="proxy-select" data-action="toggle-mode">${state.transportMode === 'tun' ? 'VPN · TUN' : 'Прокси'} <b>⌄</b></button><span class="connection-badge ${statusClass}"><i></i>${statusLabel}</span></div>
             <div class="power-stage ${statusClass}"><div class="power-glow"></div><button class="power-control" data-action="toggle" ${(state.connection === 'connecting' || !node) ? 'disabled' : ''}><span>⏻</span></button><div class="power-caption">${node ? (state.connection === 'connected' ? 'Отключиться' : 'Подключиться') : 'Добавьте сервер'}</div></div>
             <div class="selected-panel">${node ? `<div class="selected-flag">${node.flag}</div><div class="selected-copy"><strong>${escapeHtml(node.name)}</strong><span>${escapeHtml(node.country)} · ${escapeHtml(node.city)} · ${node.protocol}</span></div><div class="selected-ping ${node.availability === 'offline' ? 'bad' : ''}"><b>${node.ping == null ? '—' : `${node.ping} ms`}</b><small>TCP ping</small></div>` : '<div class="no-selection"><strong>Сервер не выбран</strong><span>Импортируйте подписку, чтобы подключиться</span></div>'}</div>
             <div class="detail-actions">${node ? `<button class="primary-outline" data-action="ping">${node.ping == null ? 'Проверить ping' : 'Проверить ещё раз'}</button><button class="ghost-button" data-action="remove">Удалить</button>` : ''}</div>
-            <div class="connection-info"><div><span>Состояние</span><strong>${statusMessage}</strong></div><div><span>Время подключения</span><strong>${state.connection === 'connected' ? formatDuration() : '—'}</strong></div><div><span>Маршрутизация</span><strong>${routeModes.find((mode) => mode.id === state.routeMode)?.title}</strong></div></div>
+            <div class="connection-info"><div><span>Состояние</span><strong>${statusMessage}</strong></div><div><span>Время подключения</span><strong>${state.connection === 'connected' ? formatDuration() : '—'}</strong></div><div><span>Маршрутизация</span><strong>${routeModes.find((mode) => mode.id === state.routeMode)?.title}</strong></div>${state.externalIp ? `<div><span>Внешний IP</span><strong>${escapeHtml(state.externalIp)}</strong></div>` : ''}</div>
             ${state.message && state.connection === 'error' ? `<div class="error-box">${escapeHtml(state.message)}</div>` : ''}
           </section>
         </div>
@@ -112,6 +114,7 @@ function bindEvents() {
   document.querySelector('[data-action="import"]')?.addEventListener('click', async () => { const value = document.querySelector('#import-input')?.value || ''; state.pendingUrl = value; state.message = 'Загружаем конфигурацию…'; state.connection = 'connecting'; render(); try { await importConfig(value); state.modal = null; state.connection = 'idle'; state.message = `${state.servers.length} серверов загружено`; render(); refreshPings(); } catch (error) { state.connection = 'error'; state.message = error.message || 'Не удалось импортировать конфигурацию'; state.modal = 'add'; render(); } });
   document.querySelectorAll('[data-action="refresh"]').forEach((button) => button.addEventListener('click', () => { if (state.subscriptionUrl) { state.pendingUrl = state.subscriptionUrl; state.modal = 'add'; render(); document.querySelector('[data-action="import"]')?.click(); } else { state.modal = 'add'; render(); } }));
   document.querySelector('[data-action="toggle"]')?.addEventListener('click', toggleConnection);
+  document.querySelector('[data-action="toggle-mode"]')?.addEventListener('click', () => { if (state.connection === 'connected') return; state.transportMode = state.transportMode === 'tun' ? 'proxy' : 'tun'; localStorage.setItem('kartoshka.transportMode', state.transportMode); render(); });
   document.querySelector('[data-action="ping"]')?.addEventListener('click', async () => { const node = selectedNode(); if (!node) return; node.ping = null; node.availability = 'testing'; render(); await pingOne(node); render(); });
   document.querySelector('[data-action="remove"]')?.addEventListener('click', () => { state.servers = state.servers.filter((item) => item.id !== state.selectedId); state.selectedId = state.servers[0]?.id || null; saveData(); render(); });
 }
@@ -138,11 +141,11 @@ async function pingOne(node) { const value = await desktopBridge.pingNode(node);
 async function toggleConnection() {
   const node = selectedNode();
   if (!node) return;
-  if (state.connection === 'connected') { await desktopBridge.disconnect(); state.connection = 'idle'; state.connectedAt = null; state.message = 'Прокси остановлен'; render(); return; }
+  if (state.connection === 'connected') { await desktopBridge.disconnect(); state.connection = 'idle'; state.connectedAt = null; state.externalIp = null; state.message = 'Подключение остановлено'; render(); return; }
   if (!capabilities.native) { state.connection = 'error'; state.message = 'Запустите Windows-версию: Preview не может изменить системный прокси'; render(); return; }
   state.connection = 'connecting'; state.message = 'Запускаем sing-box…'; render();
-  try { await desktopBridge.connect({ config: buildSingBoxConfig(state.servers, state.selectedId, state.routeMode) }); state.connection = 'connected'; state.connectedAt = Date.now(); state.message = 'Системный прокси Windows работает'; render(); }
-  catch (error) { state.connection = 'error'; state.message = error.message || 'sing-box не запустился'; render(); }
+  try { await desktopBridge.connect({ config: buildSingBoxConfig(state.servers, state.selectedId, state.routeMode, state.transportMode) }); state.message = 'Проверяем интернет через VPN…'; render(); state.externalIp = await desktopBridge.probeInternet(state.transportMode); state.connection = 'connected'; state.connectedAt = Date.now(); state.message = state.transportMode === 'tun' ? 'VPN-туннель и интернет работают' : 'Системный прокси и интернет работают'; render(); }
+  catch (error) { try { await desktopBridge.disconnect(); } catch { /* ядро уже могло завершиться */ } state.connection = 'error'; state.connectedAt = null; state.externalIp = null; state.message = error.message || 'VPN не прошёл проверку'; render(); }
 }
 
 render();

@@ -55,6 +55,24 @@ async fn test_latency(host: String, port: u16) -> Result<Option<u32>, String> {
 }
 
 #[tauri::command]
+async fn probe_internet(mode: String) -> Result<String, String> {
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(12));
+    if mode == "proxy" {
+        builder = builder.proxy(reqwest::Proxy::all("http://127.0.0.1:2080").map_err(|error| error.to_string())?);
+    }
+    let client = builder.build().map_err(|error| error.to_string())?;
+    for endpoint in ["https://api.ipify.org", "https://ifconfig.me/ip", "https://ipinfo.io/ip"] {
+        if let Ok(response) = client.get(endpoint).send().await {
+            if let Ok(body) = response.text().await {
+                let ip = body.trim().to_string();
+                if !ip.is_empty() && ip.len() <= 64 { return Ok(ip); }
+            }
+        }
+    }
+    Err("VPN запущен, но проверка выхода в интернет не прошла. Проверьте сервер, DNS и маршрут.".to_string())
+}
+
+#[tauri::command]
 async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: String) -> Result<(), String> {
     serde_json::from_str::<serde_json::Value>(&config_json)
         .map_err(|error| format!("Некорректная конфигурация sing-box: {error}"))?;
@@ -77,8 +95,10 @@ async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: 
         while events.recv().await.is_some() {}
     });
 
+    let parsed_config = serde_json::from_str::<serde_json::Value>(&config_json).unwrap_or_default();
+    let is_tun = parsed_config["inbounds"].get(0).and_then(|inbound| inbound["type"].as_str()) == Some("tun");
     for _ in 0..30 {
-        if TcpStream::connect("127.0.0.1:2080").await.is_ok() {
+        if (is_tun && TcpStream::connect("1.1.1.1:443").await.is_ok()) || (!is_tun && TcpStream::connect("127.0.0.1:2080").await.is_ok()) {
             *state.0.lock().map_err(|_| "Не удалось сохранить состояние прокси")? = Some(child);
             return Ok(());
         }
@@ -101,7 +121,7 @@ fn main() {
     tauri::Builder::default()
         .manage(ProxyState(Mutex::new(None)))
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![fetch_subscription, test_latency, start_proxy, stop_proxy])
+        .invoke_handler(tauri::generate_handler![fetch_subscription, test_latency, probe_internet, start_proxy, stop_proxy])
         .run(tauri::generate_context!())
         .expect("ошибка запуска КартошкаVPN");
 }
