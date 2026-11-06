@@ -51,7 +51,7 @@ jobs:
           mkdir -p src-tauri/binaries
           curl -L --fail --retry 3 -o /tmp/sing-box-package "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${{ matrix.archive }}"
           if [[ "${{ matrix.archive }}" == *.zip ]]; then
-            7z e /tmp/sing-box-package -osrc-tauri/binaries '${{ matrix.binary }}'
+            7z e /tmp/sing-box-package -osrc-tauri/binaries -r "*/${{ matrix.binary }}"
           else
             tar -xzf /tmp/sing-box-package -C /tmp
             cp "/tmp/sing-box-${SING_BOX_VERSION}/sing-box" src-tauri/binaries/sing-box
