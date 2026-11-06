@@ -69,10 +69,26 @@ function parseTrojan(raw, index) {
 }
 
 function parseShadowsocks(raw, index) {
-  const url = new URL(raw);
+  let source = raw;
+  const payload = raw.slice('ss://'.length).split('#')[0];
+  if (!payload.includes('@')) {
+    try {
+      const decoded = decodeBase64(payload);
+      if (decoded.includes('@')) source = `ss://${decoded}${raw.includes('#') ? `#${raw.split('#').slice(1).join('#')}` : ''}`;
+    } catch {
+      // Keep the original URL and let the regular parser handle it.
+    }
+  }
+  const url = new URL(source);
   const name = fragmentName(url, `Shadowsocks ${index + 1}`);
-  const credentials = decodeBase64(url.username || '').split(':');
-  return makeNode(name, { type: 'shadowsocks', tag: name, server: url.hostname, server_port: Number(url.port || 443), method: credentials[0] || '2022-blake3-aes-128-gcm', password: credentials.slice(1).join(':') || decodeURIComponent(url.password || '') }, index);
+  let method = '';
+  let password = '';
+  if (url.username) {
+    const credentials = decodeBase64(url.username).split(':');
+    method = credentials.shift() || '';
+    password = credentials.join(':');
+  }
+  return makeNode(name, { type: 'shadowsocks', tag: name, server: url.hostname, server_port: Number(url.port || 443), method: method || '2022-blake3-aes-128-gcm', password: password || decodeURIComponent(url.password || '') }, index);
 }
 
 function parseVmess(raw, index) {
@@ -90,8 +106,21 @@ function makeNode(name, outbound, index) {
 }
 
 export function parseSubscription(raw) {
-  const text = raw.trim();
-  const decoded = text.includes('://') ? text : decodeBase64(text);
+  let text = String(raw || '').replace(/^\uFEFF/, '').trim();
+  try {
+    if (text.startsWith('{')) {
+      const payload = JSON.parse(text);
+      const candidate = payload.data || payload.content || payload.subscription || payload.links;
+      if (Array.isArray(candidate)) text = candidate.join('\n');
+      else if (typeof candidate === 'string') text = candidate.trim();
+    }
+  } catch {
+    // Continue with the original response and let the line parser decide.
+  }
+  let decoded = text;
+  if (!decoded.includes('://')) {
+    try { decoded = decodeBase64(decodeURIComponent(decoded)); } catch { return []; }
+  }
   const lines = decoded.split(/\r?\n|\s+/).map((line) => line.trim()).filter(Boolean);
   const nodes = [];
   for (let index = 0; index < lines.length; index += 1) {

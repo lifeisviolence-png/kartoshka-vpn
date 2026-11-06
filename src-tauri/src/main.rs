@@ -8,6 +8,9 @@ struct ProxyState(Mutex<Option<CommandChild>>);
 
 #[tauri::command]
 async fn fetch_subscription(url: String) -> Result<String, String> {
+    if url.starts_with("vless://") || url.starts_with("vmess://") || url.starts_with("trojan://") || url.starts_with("ss://") {
+        return Ok(url);
+    }
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("Ссылка подписки должна начинаться с http:// или https://".to_string());
     }

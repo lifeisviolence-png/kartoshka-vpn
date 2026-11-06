@@ -3,11 +3,7 @@ import { desktopBridge } from './desktop-bridge.js';
 import { parseSubscription } from './subscription.js';
 import { buildSingBoxConfig } from './singbox-config.js';
 
-const servers = [
-  { id: 'de-fra', name: 'DE-Frankfurt-01', flag: '🇩🇪', country: 'Германия', city: 'Frankfurt', ping: 82, accent: 'amber', outbound: { type: 'direct', server: 'demo' } },
-  { id: 'nl-ams', name: 'NL-Amsterdam-01', flag: '🇳🇱', country: 'Нидерланды', city: 'Amsterdam', ping: 96, accent: 'violet', outbound: { type: 'direct', server: 'demo' } },
-  { id: 'fi-hel', name: 'FI-Helsinki-01', flag: '🇫🇮', country: 'Финляндия', city: 'Helsinki', ping: 71, accent: 'blue', outbound: { type: 'direct', server: 'demo' } }
-];
+const servers = [];
 
 const routeModes = [
   { id: 'split', title: 'Россия напрямую', subtitle: 'Зарубежные сайты через прокси' },
@@ -18,18 +14,18 @@ const routeModes = [
 const capabilities = desktopBridge.getCapabilities();
 const state = {
   connection: 'idle',
-  selectedServer: servers[0].id,
+  selectedServer: null,
   routeMode: routeModes[0].id,
   lastUpdated: 'только что',
   subscriptionUrl: localStorage.getItem('kartoshka.subscriptionUrl') || '',
-  subscriptionMessage: capabilities.native ? 'sing-box готов к запуску' : 'Preview-режим: без системного прокси',
+  subscriptionMessage: 'Сначала загрузите ссылку подписки 3x-ui',
   native: capabilities.native
 };
 
 const app = document.querySelector('#app');
 
 function selectedServer() {
-  return servers.find((server) => server.id === state.selectedServer) ?? servers[0];
+  return servers.find((server) => server.id === state.selectedServer) ?? null;
 }
 
 function statusCopy() {
@@ -47,6 +43,7 @@ function render() {
   const status = statusCopy();
   const isBusy = state.connection === 'connecting';
   const isConnected = state.connection === 'connected';
+  const hasServers = servers.length > 0;
   const buttonLabel = isBusy ? 'Подключаем…' : isConnected ? 'Отключиться' : 'Подключиться';
 
   app.innerHTML = `
@@ -74,9 +71,9 @@ function render() {
         </header>
 
         <section class="surface-card subscription-card subscription-banner" id="subscription">
-          <div class="subscription-top"><span class="eyebrow">Подписка 3x-ui</span><span class="subscription-badge">${state.subscriptionUrl ? 'подключена' : 'демо'}</span></div>
-          <div class="expiry-date">30 <span>января</span> 2027</div>
-          <div class="expiry-caption">Дата окончания подписки${state.subscriptionUrl ? ' · данные из интерфейса' : ' · демонстрационные данные'}</div>
+          <div class="subscription-top"><span class="eyebrow">Подписка 3x-ui</span><span class="subscription-badge">${hasServers ? 'подключена' : 'не подключена'}</span></div>
+          <div class="expiry-date">— <span>дата не загружена</span></div>
+          <div class="expiry-caption">Дата окончания появится после чтения данных подписки</div>
           <div class="progress-track"><span></span></div>
           <div class="subscription-bottom"><span>Осталось 85 дней</span><button type="button" data-action="refresh">Обновить сервера</button></div>
           <div class="subscription-input-row"><input id="subscription-url" type="url" value="${escapeHtml(state.subscriptionUrl)}" placeholder="Вставьте ссылку подписки 3x-ui" autocomplete="off"/><button class="load-button" type="button" data-action="load-subscription">Загрузить</button></div>
@@ -87,14 +84,14 @@ function render() {
           <div class="primary-column">
             <section class="connection-card ${status.className}" aria-live="polite">
               <div class="card-kicker"><span class="status-orb"></span> Состояние соединения</div>
-              <div class="connection-main"><div><div class="status-label">${status.label}</div><div class="status-hint">${status.hint}</div></div><button class="power-button" type="button" data-action="toggle" ${isBusy ? 'disabled' : ''}><span class="power-ring"><span class="power-glyph">⏻</span></span><span>${buttonLabel}</span></button></div>
-              <div class="connection-meta"><div class="selected-server-line"><span class="server-flag">${server.flag}</span><div><span class="meta-label">Сервер</span><strong>${server.name}</strong></div></div><div class="latency-line"><span class="meta-label">Задержка</span><strong>${server.ping} ms</strong></div></div>
+              <div class="connection-main"><div><div class="status-label">${status.label}</div><div class="status-hint">${status.hint}</div></div><button class="power-button" type="button" data-action="toggle" ${(isBusy || !hasServers) ? 'disabled' : ''}><span class="power-ring"><span class="power-glyph">⏻</span></span><span>${hasServers ? buttonLabel : 'Загрузите подписку'}</span></button></div>
+              <div class="connection-meta"><div class="selected-server-line"><span class="server-flag">${server?.flag || '·'}</span><div><span class="meta-label">Сервер</span><strong>${server ? escapeHtml(server.name) : 'Нет выбранного сервера'}</strong></div></div><div class="latency-line"><span class="meta-label">Задержка</span><strong>${server?.ping === '—' ? '—' : server ? `${server.ping} ms` : '—'}</strong></div></div>
             </section>
             <section class="surface-card" id="routing"><div class="section-heading"><div><span class="eyebrow">Логика трафика</span><h2>Маршрутизация</h2></div><span class="section-count">${routeModes.length} режима</span></div><div class="route-options">${routeModes.map((mode, index) => `<button class="route-option ${state.routeMode === mode.id ? 'is-selected' : ''}" type="button" data-route="${mode.id}"><span class="route-radio"><span></span></span><span class="route-copy"><strong>${mode.title}</strong><small>${mode.subtitle}</small></span>${index === 0 ? '<span class="recommended">рекомендуем</span>' : ''}</button>`).join('')}</div></section>
           </div>
 
           <div class="secondary-column">
-            <section class="surface-card servers-card"><div class="section-heading"><div><span class="eyebrow">3x-ui subscription</span><h2>Серверы</h2></div><button class="refresh-button" type="button" data-action="refresh" aria-label="Обновить серверы">↻</button></div><div class="server-list">${servers.map((item) => `<button class="server-row ${item.id === state.selectedServer ? 'is-selected' : ''}" type="button" data-server="${item.id}"><span class="server-avatar ${item.accent}">${item.flag}</span><span class="server-details"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.country)} · ${escapeHtml(item.city)}</small></span><span class="server-ping"><i></i>${item.ping} ms</span><span class="server-check">${item.id === state.selectedServer ? '✓' : ''}</span></button>`).join('')}</div><div class="server-footer"><span>Обновлено ${state.lastUpdated}</span><span class="healthy"><i></i>сервера в норме</span></div></section>
+            <section class="surface-card servers-card"><div class="section-heading"><div><span class="eyebrow">3x-ui subscription</span><h2>Серверы</h2></div><button class="refresh-button" type="button" data-action="refresh" aria-label="Обновить серверы" ${state.subscriptionUrl ? '' : 'disabled'}>↻</button></div><div class="server-list">${hasServers ? servers.map((item) => `<button class="server-row ${item.id === state.selectedServer ? 'is-selected' : ''}" type="button" data-server="${item.id}"><span class="server-avatar ${item.accent}">${item.flag}</span><span class="server-details"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.country)} · ${escapeHtml(item.city)}</small></span><span class="server-ping"><i></i>${item.ping === '—' ? '—' : `${item.ping} ms`}</span><span class="server-check">${item.id === state.selectedServer ? '✓' : ''}</span></button>`).join('') : '<div class="empty-state"><strong>Серверов пока нет</strong><span>Вставьте ссылку подписки 3x-ui выше и нажмите «Загрузить».</span></div>'}</div><div class="server-footer"><span>${hasServers ? `Обновлено ${state.lastUpdated}` : 'Ожидается подписка'}</span>${hasServers ? '<span class="healthy"><i></i>серверы загружены</span>' : '<span>список пуст</span>'}</div></section>
           </div>
         </section>
 
@@ -111,13 +108,16 @@ async function loadSubscription() {
   const input = document.querySelector('#subscription-url');
   const url = input?.value.trim();
   if (!url) throw new Error('Вставьте ссылку подписки 3x-ui');
-  state.subscriptionUrl = url;
-  localStorage.setItem('kartoshka.subscriptionUrl', url);
+  if (!/^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/)/i.test(url)) {
+    throw new Error('Нужна http(s)-ссылка подписки или прямая vless/vmess/trojan/ss-ссылка');
+  }
   const raw = await desktopBridge.fetchSubscription(url);
   const imported = parseSubscription(raw);
-  if (!imported.length) throw new Error('Не найдено поддерживаемых ссылок vless/vmess/trojan/ss');
+  if (!imported.length) throw new Error('Ссылка открылась, но поддерживаемые узлы vless/vmess/trojan/ss не найдены');
   servers.splice(0, servers.length, ...imported);
   state.selectedServer = servers[0].id;
+  state.subscriptionUrl = url;
+  localStorage.setItem('kartoshka.subscriptionUrl', url);
   state.lastUpdated = 'только что';
   state.subscriptionMessage = `Загружено серверов: ${servers.length}`;
 }
@@ -126,6 +126,7 @@ function bindEvents() {
   document.querySelectorAll('[data-server]').forEach((button) => button.addEventListener('click', () => { if (state.connection === 'connected') state.connection = 'idle'; state.selectedServer = button.dataset.server; render(); }));
   document.querySelectorAll('[data-route]').forEach((button) => button.addEventListener('click', () => { state.routeMode = button.dataset.route; render(); }));
   document.querySelector('[data-action="toggle"]')?.addEventListener('click', async () => {
+    if (!servers.length) { state.connection = 'error'; state.subscriptionMessage = 'Сначала загрузите подписку и выберите сервер'; render(); return; }
     if (state.connection === 'connected') { await desktopBridge.disconnect(); state.connection = 'idle'; state.subscriptionMessage = 'Прокси остановлен'; render(); return; }
     state.connection = 'connecting'; render();
     try {
@@ -146,7 +147,7 @@ function bindEvents() {
   document.querySelectorAll('[data-action="refresh"]').forEach((button) => button.addEventListener('click', async () => {
     button.classList.add('is-spinning');
     if (state.subscriptionUrl) { try { await loadSubscription(); } catch (error) { state.subscriptionMessage = error.message; } }
-    else { servers.forEach((item) => { item.ping = Math.max(48, item.ping + Math.round(Math.random() * 14 - 7)); }); }
+    else { state.subscriptionMessage = 'Сначала загрузите ссылку подписки 3x-ui'; }
     state.lastUpdated = 'только что'; render();
   }));
   document.querySelectorAll('[data-scroll]').forEach((button) => button.addEventListener('click', () => document.getElementById(button.dataset.scroll)?.scrollIntoView({ behavior: 'smooth', block: 'center' })));

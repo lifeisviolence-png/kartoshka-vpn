@@ -17,6 +17,7 @@ export const desktopBridge = {
     return { ok: true };
   },
   async fetchSubscription(url) {
+    if (/^(vless|vmess|trojan|ss):\/\//i.test(url)) return url;
     if (isDesktop) return invoke('fetch_subscription', { url });
     const response = await fetch(url, { cache: 'no-store' });
     if (!response.ok) throw new Error(`Ошибка подписки: HTTP ${response.status}`);
