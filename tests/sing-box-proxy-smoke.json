@@ -1,0 +1,11 @@
+{
+  "log": { "level": "error", "timestamp": true },
+  "inbounds": [{
+    "type": "mixed",
+    "tag": "smoke-in",
+    "listen": "127.0.0.1",
+    "listen_port": 2080
+  }],
+  "outbounds": [{ "type": "direct", "tag": "direct" }],
+  "route": { "final": "direct" }
+}

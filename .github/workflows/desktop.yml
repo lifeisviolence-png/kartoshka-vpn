@@ -56,6 +56,24 @@ jobs:
           chmod +x src-tauri/binaries/sing-box-${{ matrix.target }}${{ matrix.binary == 'sing-box.exe' && '.exe' || '' }} || true
       - name: Generate desktop icons
         run: pnpm tauri icon src-tauri/icons/potato-mark.svg
+      - name: Smoke test sing-box proxy on Windows
+        shell: pwsh
+        run: |
+          $binary = "src-tauri/binaries/sing-box-${{ matrix.target }}.exe"
+          & $binary check -c tests/sing-box-proxy-smoke.json
+          $process = Start-Process -FilePath $binary -ArgumentList @("run", "-c", "tests/sing-box-proxy-smoke.json") -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            1..50 | ForEach-Object {
+              Start-Sleep -Milliseconds 100
+              if (Get-NetTCPConnection -LocalPort 2080 -State Listen -ErrorAction SilentlyContinue) { $ready = $true; break }
+            }
+            if (-not $ready) { throw "sing-box не поднял локальный proxy" }
+            $response = Invoke-WebRequest -UseBasicParsing -Proxy http://127.0.0.1:2080 -Uri https://www.gstatic.com/generate_204 -TimeoutSec 20
+            if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) { throw "HTTP smoke-test вернул $($response.StatusCode)" }
+          } finally {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          }
       - name: Build and validate Tauri app
         env:
           RUST_BACKTRACE: 1

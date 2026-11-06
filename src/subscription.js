@@ -81,6 +81,7 @@ function transportConfig(url) {
 
 function parseVless(raw, index) {
   const url = new URL(raw);
+  if (!url.hostname || !url.username) throw new Error('VLESS без адреса или UUID');
   const fallback = `VLESS ${index + 1}`;
   const name = fragmentName(url, fallback);
   const outbound = {
@@ -94,6 +95,7 @@ function parseVless(raw, index) {
 
 function parseTrojan(raw, index) {
   const url = new URL(raw);
+  if (!url.hostname || !url.username) throw new Error('Trojan без адреса или пароля');
   const name = fragmentName(url, `Trojan ${index + 1}`);
   return makeNode(name, { type: 'trojan', tag: name, server: url.hostname, server_port: Number(url.port || 443), password: decodeURIComponent(url.username), tls: tlsConfig(url), transport: transportConfig(url) }, index, 'Trojan');
 }
@@ -108,11 +110,13 @@ function parseShadowsocks(raw, index) {
     } catch { /* regular URL parser below */ }
   }
   const url = new URL(source);
+  if (!url.hostname) throw new Error('Shadowsocks без адреса сервера');
   const name = fragmentName(url, `Shadowsocks ${index + 1}`);
   let method = '';
   let password = '';
   if (url.username) {
-    const credentials = decodeBase64(url.username).split(':');
+    const encodedCredentials = safeDecode(url.username);
+    const credentials = (encodedCredentials.includes(':') ? encodedCredentials : decodeBase64(encodedCredentials)).split(':');
     method = credentials.shift() || '';
     password = credentials.join(':');
   }
@@ -133,6 +137,7 @@ function parseVmess(raw, index) {
 
 function parseHysteria2(raw, index) {
   const url = new URL(raw);
+  if (!url.hostname || !url.username) throw new Error('Hysteria2 без адреса или пароля');
   const name = fragmentName(url, `Hysteria2 ${index + 1}`);
   const outbound = { type: 'hysteria2', tag: name, server: url.hostname, server_port: Number(url.port || 443), password: decodeURIComponent(url.username || ''), tls: { enabled: true, server_name: url.searchParams.get('sni') || url.hostname } };
   const obfs = url.searchParams.get('obfs-password');
@@ -153,6 +158,8 @@ function makeNode(name, outbound, index, protocol) {
     ping: null,
     availability: 'unknown',
     accent: ['amber', 'violet', 'blue'][index % 3],
+    source: 'subscription',
+    favorite: false,
     outbound: { ...outbound, tag: `proxy-${index}` }
   };
 }
@@ -169,7 +176,7 @@ export function parseUserinfo(value) {
   return { ...data, total, used, expiresAt: data.expire ? new Date(data.expire * 1000) : null };
 }
 
-export function parseSubscription(raw) {
+export function parseSubscriptionDetailed(raw) {
   let text = String(raw || '').replace(/^\uFEFF/, '').trim();
   try {
     if (text.startsWith('{')) {
@@ -181,10 +188,11 @@ export function parseSubscription(raw) {
   } catch { /* line parser below */ }
   let decoded = text;
   if (!decoded.includes('://')) {
-    try { decoded = decodeBase64(decodeURIComponent(decoded)); } catch { return []; }
+    try { decoded = decodeBase64(decodeURIComponent(decoded)); } catch { return { nodes: [], errors: ['Ответ не является ссылками или корректным base64'] }; }
   }
   const lines = decoded.split(/\r?\n|\s+/).map((line) => line.trim()).filter(Boolean);
   const nodes = [];
+  const errors = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     try {
@@ -193,7 +201,10 @@ export function parseSubscription(raw) {
       else if (line.startsWith('trojan://')) nodes.push(parseTrojan(line, index));
       else if (line.startsWith('ss://')) nodes.push(parseShadowsocks(line, index));
       else if (line.startsWith('hysteria2://')) nodes.push(parseHysteria2(line, index));
-    } catch { /* skip only malformed node */ }
+      else if (line.includes('://')) errors.push(`Строка ${index + 1}: неподдерживаемая схема`);
+    } catch (error) { errors.push(`Строка ${index + 1}: ${error.message || 'некорректная конфигурация'}`); }
   }
-  return nodes;
+  return { nodes, errors };
 }
+
+export function parseSubscription(raw) { return parseSubscriptionDetailed(raw).nodes; }

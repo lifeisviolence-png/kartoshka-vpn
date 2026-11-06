@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 const isDesktop = Boolean(window.__TAURI_INTERNALS__);
 const directScheme = /^(vless|vmess|trojan|ss|hysteria2):\/\//i;
@@ -25,9 +26,21 @@ export const desktopBridge = {
     if (!isDesktop || !node?.outbound?.server) return null;
     return invoke('test_latency', { host: node.outbound.server, port: Number(node.outbound.server_port || 443) });
   },
+  async proxyLatency() {
+    if (!isDesktop) return null;
+    return invoke('test_proxy_latency');
+  },
   async probeInternet() {
     if (!isDesktop) throw new Error('Preview не может проверить системный VPN');
     return invoke('probe_internet');
+  },
+  async readLogs() {
+    if (!isDesktop) return '';
+    return invoke('read_logs');
+  },
+  async watchProxyExit(callback) {
+    if (!isDesktop) return () => {};
+    return listen('proxy-exited', (event) => callback(event.payload));
   },
   getCapabilities() {
     return { systemProxy: isDesktop, subscriptionImport: true, geofiles: false, native: isDesktop };
