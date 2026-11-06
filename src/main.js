@@ -10,6 +10,11 @@ const routeModes = [
 ];
 const directScheme = /^(vless|vmess|trojan|ss|hysteria2):\/\//i;
 const capabilities = desktopBridge.getCapabilities();
+const transportSettingsVersion = localStorage.getItem('kartoshka.transportSettingsVersion');
+if (transportSettingsVersion !== '2') {
+  localStorage.setItem('kartoshka.transportMode', 'proxy');
+  localStorage.setItem('kartoshka.transportSettingsVersion', '2');
+}
 
 const state = {
   servers: loadJson('kartoshka.nodes', []),
@@ -20,7 +25,7 @@ const state = {
   connection: 'idle',
   connectedAt: null,
   routeMode: localStorage.getItem('kartoshka.routeMode') || 'split',
-  transportMode: localStorage.getItem('kartoshka.transportMode') || 'tun',
+  transportMode: localStorage.getItem('kartoshka.transportMode') || 'proxy',
   externalIp: null,
   activeNav: 'servers',
   modal: null,

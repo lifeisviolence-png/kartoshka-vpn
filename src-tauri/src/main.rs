@@ -2,11 +2,26 @@
 
 use std::{fs, sync::Mutex, time::Instant};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 use tokio::{net::TcpStream, time::{sleep, timeout, Duration}};
 
 struct ProxyState(Mutex<Option<CommandChild>>);
+
+fn restore_windows_network() {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("netsh").args(["winhttp", "reset", "proxy"]).status();
+        let _ = std::process::Command::new("reg").args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f"]).status();
+    }
+}
+
+fn stop_child(state: &ProxyState) {
+    if let Ok(mut guard) = state.0.lock() {
+        if let Some(mut child) = guard.take() { let _ = child.kill(); }
+    }
+    restore_windows_network();
+}
 
 #[derive(Serialize)]
 struct SubscriptionResponse {
@@ -111,9 +126,7 @@ async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: 
 
 #[tauri::command]
 fn stop_proxy(state: State<'_, ProxyState>) -> Result<(), String> {
-    if let Some(mut child) = state.0.lock().map_err(|_| "Не удалось получить состояние прокси")?.take() {
-        child.kill().map_err(|error| error.to_string())?;
-    }
+    stop_child(state.inner());
     Ok(())
 }
 
@@ -122,6 +135,11 @@ fn main() {
         .manage(ProxyState(Mutex::new(None)))
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![fetch_subscription, test_latency, probe_internet, start_proxy, stop_proxy])
-        .run(tauri::generate_context!())
-        .expect("ошибка запуска КартошкаVPN");
+        .build(tauri::generate_context!())
+        .expect("ошибка запуска КартошкаVPN")
+        .run(|app, event| {
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                if let Some(state) = app.try_state::<ProxyState>() { stop_child(state.inner()); }
+            }
+        });
 }
