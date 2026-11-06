@@ -21,7 +21,7 @@ const state = {
   connectedAt: null,
   routeMode: localStorage.getItem('kartoshka.routeMode') || 'split',
   externalIp: null,
-  activeNav: 'servers',
+  activeNav: 'home',
   logs: [],
   settings: loadJson('kartoshka.settings', { launchOnStart: false, autoReconnect: true, dnsMode: 'system' }),
   modal: null,
@@ -67,17 +67,18 @@ function render() {
       <aside class="sidebar">
         <div class="brand"><img src="/potato-mark.svg" alt=""/><div><strong>Kartoshka<span>VPN</span></strong><small>PRIVATE NETWORK</small></div></div>
         <nav class="side-nav">
-          <button class="side-item ${state.activeNav === 'add' ? 'active' : ''}" data-nav="add"><span class="side-icon">＋</span>Добавить</button>
+          <button class="side-item ${state.activeNav === 'home' ? 'active' : ''}" data-nav="home"><span class="side-icon">⌂</span>Главная</button>
           <button class="side-item ${state.activeNav === 'servers' ? 'active' : ''}" data-nav="servers"><span class="side-icon">◉</span>Серверы</button>
           <button class="side-item ${state.activeNav === 'settings' ? 'active' : ''}" data-nav="settings"><span class="side-icon">⚙</span>Настройки</button>
           <button class="side-item ${state.activeNav === 'stats' ? 'active' : ''}" data-nav="stats"><span class="side-icon">▥</span>Статистика</button>
           <button class="side-item ${state.activeNav === 'logs' ? 'active' : ''}" data-nav="logs"><span class="side-icon">▤</span>Логи</button>
+          <button class="side-item" data-action="add"><span class="side-icon">＋</span>Добавить сервер</button>
         </nav>
         <div class="sidebar-bottom"><div class="secure-dot"></div><span>${capabilities.native ? 'Готово к подключению' : 'Предпросмотр'}</span><button class="about-button">ⓘ О программе</button></div>
       </aside>
       <main class="main-area">
-        <header class="topbar"><div><div class="overline">KARTOSHKAVPN PC</div><h1>${state.activeNav === 'servers' ? 'Серверы' : state.activeNav === 'add' ? 'Добавить сервер' : state.activeNav === 'stats' ? 'Статистика' : state.activeNav === 'logs' ? 'Логи' : 'Настройки'}</h1></div><div class="topbar-right"><span class="mode-pill"><i></i>DESKTOP</span><button class="round-button" title="Обновить подписку" data-action="refresh">↻</button></div></header>
-        ${['settings', 'stats', 'logs'].includes(state.activeNav) ? utilityMarkup() : `<div class="workspace">
+        <header class="topbar"><div><div class="overline">KARTOSHKAVPN PC</div><h1>${state.activeNav === 'home' ? 'Главная' : state.activeNav === 'servers' ? 'Серверы' : state.activeNav === 'add' ? 'Добавить сервер' : state.activeNav === 'stats' ? 'Статистика' : state.activeNav === 'logs' ? 'Логи' : 'Настройки'}</h1></div><div class="topbar-right"><span class="mode-pill"><i></i>DESKTOP</span><button class="round-button" title="Обновить подписку" data-action="refresh">↻</button></div></header>
+        ${state.activeNav === 'home' ? homeMarkup(node) : ['settings', 'stats', 'logs'].includes(state.activeNav) ? utilityMarkup() : `<div class="workspace">
           <section class="server-column">
             <div class="server-toolbar"><label class="search-box"><span>⌕</span><input id="server-search" value="${escapeHtml(state.search)}" placeholder="Введите текст для поиска"/></label><button class="toolbar-button" data-action="refresh" title="Обновить">↻</button><button class="toolbar-button" data-action="add" title="Добавить">•••</button></div>
             <section class="subscription-panel ${state.subscriptionUrl ? 'loaded' : ''}">
@@ -102,6 +103,19 @@ function render() {
     ${state.modal === 'add' ? modalMarkup() : ''}
   `;
   bindEvents();
+}
+
+function homeMarkup(node) {
+  const [, statusMessage, statusClass] = statusInfo();
+  return `<section class="home-screen ${statusClass}">
+    <div class="home-status"><span class="home-kicker">СОСТОЯНИЕ ПОДКЛЮЧЕНИЯ</span><h2>${statusClass === 'connected' ? 'VPN подключён' : statusClass === 'connecting' ? 'Подключение…' : statusClass === 'error' ? 'Ошибка подключения' : 'VPN отключён'}</h2><p>${escapeHtml(statusMessage)}</p></div>
+    <div class="home-power"><div class="home-ring ring-one"></div><div class="home-ring ring-two"></div><button class="home-power-button" data-action="toggle" ${(state.connection === 'connecting' || !node) ? 'disabled' : ''}><span>⏻</span></button></div>
+    <div class="home-caption">${node ? (state.connection === 'connected' ? 'Отключиться' : 'Нажмите, чтобы подключиться') : 'Добавьте сервер, чтобы начать'}</div>
+    <button class="home-server-card" data-nav="servers"><span class="home-server-flag">${node?.flag || '＋'}</span><span><strong>${escapeHtml(node?.name || 'Сервер не выбран')}</strong><small>${node ? `${escapeHtml(node.country)} · ${escapeHtml(node.city)}` : 'Добавить конфигурацию'}</small></span><span class="home-server-arrow">›</span></button>
+    <button class="home-connect-button" data-action="toggle" ${(state.connection === 'connecting' || !node) ? 'disabled' : ''}><span>⏻</span>${state.connection === 'connected' ? 'Отключиться' : 'Подключиться'}</button>
+    ${state.externalIp ? `<div class="home-ip">Внешний IP <strong>${escapeHtml(state.externalIp)}</strong></div>` : ''}
+    ${state.connection === 'error' ? `<div class="error-box home-error">${escapeHtml(state.message)}</div>` : ''}
+  </section>`;
 }
 
 function serverCard(node) {

@@ -39,3 +39,36 @@ button, input, textarea { font: inherit; color: inherit; } button { border: 0; }
 .stat-grid strong { display: block; margin-top: 10px; color: #fff; font-size: 17px; }
 .log-view { min-height: 360px; margin: 0; padding: 16px; overflow: auto; border: 1px solid rgba(135,91,183,.3); border-radius: 10px; color: #cbb8e1; background: #160e24; font: 12px/1.6 'DM Mono', monospace; white-space: pre-wrap; }
 @media (max-width: 850px) { .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .utility-screen { padding: 18px; } }
+
+.home-screen { position: relative; display: flex; min-height: 650px; flex-direction: column; align-items: center; justify-content: center; padding: 32px 22px 44px; overflow: hidden; }
+.home-screen::after { content: ''; position: absolute; right: -12%; bottom: -28%; width: 720px; height: 260px; border-radius: 50%; background: radial-gradient(ellipse, rgba(123,69,220,.2), transparent 68%); pointer-events: none; }
+.home-status { position: relative; z-index: 1; width: min(100%, 620px); text-align: center; }
+.home-kicker { color: #a996c8; font: 9px 'DM Mono', monospace; letter-spacing: .15em; }
+.home-status h2 { margin-top: 13px; color: #fff; font-size: clamp(30px, 4vw, 46px); letter-spacing: -.07em; }
+.home-status p { margin-top: 10px; color: #a99bb9; font-size: 13px; }
+.home-power { position: relative; z-index: 1; display: grid; place-items: center; width: 280px; height: 280px; margin: 12px 0 -4px; }
+.home-ring { position: absolute; border: 1px solid rgba(172,124,255,.35); border-radius: 50%; box-shadow: 0 0 34px rgba(139,81,240,.15); }
+.ring-one { width: 220px; height: 220px; }
+.ring-two { width: 280px; height: 280px; opacity: .42; }
+.home-power-button { position: relative; z-index: 2; display: grid; place-items: center; width: 150px; height: 150px; border: 1px solid #c294ff; border-radius: 50%; color: #fff; background: radial-gradient(circle at 35% 25%, #a873ff, #6337bd 67%, #39216c); box-shadow: 0 0 38px rgba(161,91,255,.46), inset 0 -14px 24px rgba(25,10,52,.3); cursor: pointer; transition: transform .2s ease, filter .2s ease; }
+.home-power-button:hover:not(:disabled) { transform: scale(1.04); filter: brightness(1.1); }
+.home-power-button:disabled { opacity: .45; cursor: not-allowed; }
+.home-power-button span { font-size: 63px; font-weight: 300; }
+.home-screen.connected .home-power-button { border-color: #80e7aa; background: radial-gradient(circle at 35% 25%, #67d695, #258451 68%, #174a32); box-shadow: 0 0 38px rgba(75,220,145,.35); }
+.home-screen.connected .home-ring { border-color: rgba(90,220,148,.32); }
+.home-screen.error .home-power-button { border-color: #ff8999; background: radial-gradient(circle at 35% 25%, #d96795, #752b66 68%, #3e173e); }
+.home-caption { position: relative; z-index: 1; margin-top: 4px; color: #d9cae9; font-size: 14px; font-weight: 700; }
+.home-server-card { position: relative; z-index: 1; display: flex; align-items: center; gap: 14px; width: min(100%, 520px); margin-top: 28px; padding: 15px 18px; border: 1px solid #654394; border-radius: 14px; color: #fff; background: rgba(43,24,74,.82); box-shadow: 0 14px 34px rgba(7,2,18,.24); cursor: pointer; text-align: left; }
+.home-server-card:hover { border-color: #b17cff; background: #35205a; }
+.home-server-flag { display: grid; place-items: center; width: 43px; height: 43px; border-radius: 12px; background: #24153e; font-size: 25px; }
+.home-server-card strong, .home-server-card small { display: block; }
+.home-server-card strong { font-size: 15px; }
+.home-server-card small { margin-top: 5px; color: #ab9bbb; font-size: 11px; }
+.home-server-arrow { margin-left: auto; color: #cdb2f4; font-size: 30px; line-height: 1; }
+.home-connect-button { position: relative; z-index: 1; display: flex; align-items: center; justify-content: center; gap: 10px; width: min(100%, 520px); min-height: 58px; margin-top: 16px; border-radius: 15px; color: #fff; background: linear-gradient(135deg, #a55eff, #7136d1); box-shadow: 0 12px 26px rgba(112,51,205,.33); cursor: pointer; font-size: 16px; font-weight: 800; }
+.home-connect-button:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.home-connect-button:disabled { opacity: .42; cursor: not-allowed; }
+.home-connect-button span { font-size: 25px; font-weight: 300; }
+.home-ip { position: relative; z-index: 1; margin-top: 15px; color: #a99bb9; font: 10px 'DM Mono', monospace; }
+.home-ip strong { margin-left: 6px; color: #cfaaff; }
+.home-error { position: relative; z-index: 1; width: min(100%, 520px); }
