@@ -84,6 +84,14 @@ function render() {
           </div>
         </header>
 
+        <section class="surface-card subscription-card subscription-banner" id="subscription">
+          <div class="subscription-top"><span class="eyebrow">Подписка</span><span class="subscription-badge">активна</span></div>
+          <div class="expiry-date">30 <span>января</span> 2027</div>
+          <div class="expiry-caption">Дата окончания подписки</div>
+          <div class="progress-track"><span></span></div>
+          <div class="subscription-bottom"><span>Осталось 85 дней</span><button type="button" data-action="refresh">Обновить данные</button></div>
+        </section>
+
         <section class="dashboard-grid">
           <div class="primary-column">
             <section class="connection-card ${status.className}" aria-live="polite">
@@ -143,13 +151,6 @@ function render() {
               <div class="server-footer"><span>Обновлено ${state.lastUpdated}</span><span class="healthy"><i></i>сервера в норме</span></div>
             </section>
 
-            <section class="surface-card subscription-card" id="subscription">
-              <div class="subscription-top"><span class="eyebrow">Подписка</span><span class="subscription-badge">активна</span></div>
-              <div class="expiry-date">30 <span>января</span> 2027</div>
-              <div class="expiry-caption">Дата окончания подписки</div>
-              <div class="progress-track"><span></span></div>
-              <div class="subscription-bottom"><span>Осталось 85 дней</span><button type="button" data-action="refresh">Обновить данные</button></div>
-            </section>
           </div>
         </section>
 
