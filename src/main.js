@@ -10,11 +10,6 @@ const routeModes = [
 ];
 const directScheme = /^(vless|vmess|trojan|ss|hysteria2):\/\//i;
 const capabilities = desktopBridge.getCapabilities();
-const transportSettingsVersion = localStorage.getItem('kartoshka.transportSettingsVersion');
-if (transportSettingsVersion !== '2') {
-  localStorage.setItem('kartoshka.transportMode', 'proxy');
-  localStorage.setItem('kartoshka.transportSettingsVersion', '2');
-}
 
 const state = {
   servers: loadJson('kartoshka.nodes', []),
@@ -25,12 +20,11 @@ const state = {
   connection: 'idle',
   connectedAt: null,
   routeMode: localStorage.getItem('kartoshka.routeMode') || 'split',
-  transportMode: localStorage.getItem('kartoshka.transportMode') || 'proxy',
   externalIp: null,
   activeNav: 'servers',
   modal: null,
   search: '',
-  message: capabilities.native ? 'Системный прокси готов' : 'Preview: системный прокси недоступен'
+  message: capabilities.native ? 'Готово к подключению' : 'Предпросмотр без подключения'
 };
 if (!state.selectedId || !state.servers.some((node) => node.id === state.selectedId)) state.selectedId = state.servers[0]?.id || null;
 
@@ -48,7 +42,7 @@ function statusInfo() {
   return {
     idle: ['Не подключено', state.message, 'idle'],
     connecting: ['Подключение…', 'Проверяем локальный прокси sing-box', 'connecting'],
-    connected: ['Подключено', 'Системный прокси Windows работает через sing-box', 'connected'],
+    connected: ['Подключено', 'Соединение через выбранный сервер активно', 'connected'],
     error: ['Ошибка', state.message, 'error']
   }[state.connection];
 }
@@ -71,7 +65,7 @@ function render() {
           <button class="side-item" data-nav="stats"><span class="side-icon">▥</span>Статистика</button>
           <button class="side-item" data-nav="logs"><span class="side-icon">▤</span>Логи</button>
         </nav>
-        <div class="sidebar-bottom"><div class="secure-dot"></div><span>${capabilities.native ? 'sing-box готов' : 'Preview режим'}</span><small>v0.4 · proxy edition</small><button class="about-button">ⓘ О программе</button></div>
+        <div class="sidebar-bottom"><div class="secure-dot"></div><span>${capabilities.native ? 'Готово к подключению' : 'Предпросмотр'}</span><button class="about-button">ⓘ О программе</button></div>
       </aside>
       <main class="main-area">
         <header class="topbar"><div><div class="overline">KARTOSHKAVPN PC</div><h1>${state.activeNav === 'servers' ? 'Серверы' : state.activeNav === 'add' ? 'Добавить сервер' : 'Настройки'}</h1></div><div class="topbar-right"><span class="mode-pill"><i></i>DESKTOP</span><button class="round-button" title="Обновить подписку" data-action="refresh">↻</button></div></header>
@@ -86,15 +80,15 @@ function render() {
             <div class="server-list">${nodes.length ? nodes.map((item) => serverCard(item)).join('') : `<div class="list-empty"><div class="empty-orb">＋</div><strong>${state.servers.length ? 'Ничего не найдено' : 'Список серверов пуст'}</strong><span>${state.servers.length ? 'Попробуйте изменить поиск' : 'Нажмите «Добавить» и вставьте ссылку'}</span></div>`}</div>
           </section>
           <section class="control-column">
-            <div class="control-top"><button class="proxy-select" data-action="toggle-mode">${state.transportMode === 'tun' ? 'VPN · TUN' : 'Прокси'} <b>⌄</b></button><span class="connection-badge ${statusClass}"><i></i>${statusLabel}</span></div>
+            <div class="control-top"><span class="proxy-select">Подключение</span><span class="connection-badge ${statusClass}"><i></i>${statusLabel}</span></div>
             <div class="power-stage ${statusClass}"><div class="power-glow"></div><button class="power-control" data-action="toggle" ${(state.connection === 'connecting' || !node) ? 'disabled' : ''}><span>⏻</span></button><div class="power-caption">${node ? (state.connection === 'connected' ? 'Отключиться' : 'Подключиться') : 'Добавьте сервер'}</div></div>
             <div class="selected-panel">${node ? `<div class="selected-flag">${node.flag}</div><div class="selected-copy"><strong>${escapeHtml(node.name)}</strong><span>${escapeHtml(node.country)} · ${escapeHtml(node.city)} · ${node.protocol}</span></div><div class="selected-ping ${node.availability === 'offline' ? 'bad' : ''}"><b>${node.ping == null ? '—' : `${node.ping} ms`}</b><small>TCP ping</small></div>` : '<div class="no-selection"><strong>Сервер не выбран</strong><span>Импортируйте подписку, чтобы подключиться</span></div>'}</div>
             <div class="detail-actions">${node ? `<button class="primary-outline" data-action="ping">${node.ping == null ? 'Проверить ping' : 'Проверить ещё раз'}</button><button class="ghost-button" data-action="remove">Удалить</button>` : ''}</div>
-            <div class="connection-info"><div><span>Состояние</span><strong>${statusMessage}</strong></div><div><span>Время подключения</span><strong>${state.connection === 'connected' ? formatDuration() : '—'}</strong></div><div><span>Маршрутизация</span><strong>${routeModes.find((mode) => mode.id === state.routeMode)?.title}</strong></div>${state.externalIp ? `<div><span>Внешний IP</span><strong>${escapeHtml(state.externalIp)}</strong></div>` : ''}</div>
+            <div class="connection-info"><div><span>Состояние</span><strong>${statusMessage}</strong></div><div><span>Время подключения</span><strong>${state.connection === 'connected' ? formatDuration() : '—'}</strong></div><div><span>Режим</span><strong>${routeModes.find((mode) => mode.id === state.routeMode)?.title}</strong></div>${state.externalIp ? `<div><span>Внешний IP</span><strong>${escapeHtml(state.externalIp)}</strong></div>` : ''}</div>
             ${state.message && state.connection === 'error' ? `<div class="error-box">${escapeHtml(state.message)}</div>` : ''}
           </section>
         </div>
-        <footer class="bottom-note"><span>● ${capabilities.native ? 'Системный прокси Windows' : 'Preview без системного прокси'}</span><span>Настройки сохраняются локально</span></footer>
+    <footer class="bottom-note"><span>● ${capabilities.native ? 'Подключение готово' : 'Предпросмотр'}</span></footer>
       </main>
     </div>
     ${state.modal === 'add' ? modalMarkup() : ''}
@@ -119,7 +113,6 @@ function bindEvents() {
   document.querySelector('[data-action="import"]')?.addEventListener('click', async () => { const value = document.querySelector('#import-input')?.value || ''; state.pendingUrl = value; state.message = 'Загружаем конфигурацию…'; state.connection = 'connecting'; render(); try { await importConfig(value); state.modal = null; state.connection = 'idle'; state.message = `${state.servers.length} серверов загружено`; render(); refreshPings(); } catch (error) { state.connection = 'error'; state.message = error.message || 'Не удалось импортировать конфигурацию'; state.modal = 'add'; render(); } });
   document.querySelectorAll('[data-action="refresh"]').forEach((button) => button.addEventListener('click', () => { if (state.subscriptionUrl) { state.pendingUrl = state.subscriptionUrl; state.modal = 'add'; render(); document.querySelector('[data-action="import"]')?.click(); } else { state.modal = 'add'; render(); } }));
   document.querySelector('[data-action="toggle"]')?.addEventListener('click', toggleConnection);
-  document.querySelector('[data-action="toggle-mode"]')?.addEventListener('click', () => { if (state.connection === 'connected') return; state.transportMode = state.transportMode === 'tun' ? 'proxy' : 'tun'; localStorage.setItem('kartoshka.transportMode', state.transportMode); render(); });
   document.querySelector('[data-action="ping"]')?.addEventListener('click', async () => { const node = selectedNode(); if (!node) return; node.ping = null; node.availability = 'testing'; render(); await pingOne(node); render(); });
   document.querySelector('[data-action="remove"]')?.addEventListener('click', () => { state.servers = state.servers.filter((item) => item.id !== state.selectedId); state.selectedId = state.servers[0]?.id || null; saveData(); render(); });
 }
@@ -149,7 +142,7 @@ async function toggleConnection() {
   if (state.connection === 'connected') { await desktopBridge.disconnect(); state.connection = 'idle'; state.connectedAt = null; state.externalIp = null; state.message = 'Подключение остановлено'; render(); return; }
   if (!capabilities.native) { state.connection = 'error'; state.message = 'Запустите Windows-версию: Preview не может изменить системный прокси'; render(); return; }
   state.connection = 'connecting'; state.message = 'Запускаем sing-box…'; render();
-  try { await desktopBridge.connect({ config: buildSingBoxConfig(state.servers, state.selectedId, state.routeMode, state.transportMode) }); state.message = 'Проверяем интернет через VPN…'; render(); state.externalIp = await desktopBridge.probeInternet(state.transportMode); state.connection = 'connected'; state.connectedAt = Date.now(); state.message = state.transportMode === 'tun' ? 'VPN-туннель и интернет работают' : 'Системный прокси и интернет работают'; render(); }
+  try { await desktopBridge.connect({ config: buildSingBoxConfig(state.servers, state.selectedId, state.routeMode) }); state.message = 'Проверяем соединение…'; render(); state.externalIp = await desktopBridge.probeInternet(); state.connection = 'connected'; state.connectedAt = Date.now(); state.message = 'Интернет через выбранный сервер работает'; render(); }
   catch (error) { try { await desktopBridge.disconnect(); } catch { /* ядро уже могло завершиться */ } state.connection = 'error'; state.connectedAt = null; state.externalIp = null; state.message = error.message || 'VPN не прошёл проверку'; render(); }
 }
 

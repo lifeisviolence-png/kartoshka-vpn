@@ -1,24 +1,14 @@
-# KartoshkaVPN Desktop v0.4
+# KartoshkaVPN Windows
 
-## Архитектура
+KartoshkaVPN использует Tauri 2 и bundled sing-box только как локальный mixed HTTP/HTTPS/SOCKS proxy на `127.0.0.1:2080`. TUN, виртуальные адаптеры и системные маршруты Windows в пользовательском режиме не используются.
 
-Приложение использует Tauri 2 и поставляет sing-box как sidecar. Основной режим — TUN-интерфейс Windows с `auto_route`, `strict_route`, DNS hijack и MTU 1500. Альтернативный режим — локальный mixed HTTP/SOCKS proxy на `127.0.0.1:2080`. Перед отображением статуса «Подключено» приложение выполняет реальный запрос определения внешнего IP.
+Перед запуском proxy native-слой сохраняет значения Windows `ProxyEnable`, `ProxyServer`, `ProxyOverride`, `AutoConfigURL` и `AutoDetect`. После успешного поднятия локального порта приложение включает системный proxy. При отключении, ошибке, смене сервера и закрытии окна дочерний процесс останавливается, а исходные значения реестра восстанавливаются.
 
-## Поддерживаемый импорт
+После включения выполняется запрос к сервису определения IP через локальный proxy. Если запрос не проходит, пользователь не видит статус «Подключено», proxy отключается, а прежние настройки возвращаются.
 
-- subscription URL 3x-ui;
-- VLESS, включая TLS/Reality, WS и gRPC;
-- VMess;
-- Trojan;
-- Shadowsocks;
-- Hysteria2;
-- несколько прямых ссылок построчно.
-
-После импорта приложение сохраняет узлы локально, читает `subscription-userinfo`, показывает срок при наличии заголовка и выполняет TCP-ping каждого узла. TCP-ping измеряет доступность адреса/порта, а не гарантирует успешность всей VPN-сессии.
+Поддерживаются VLESS/VLESS Reality, VMess, Trojan, Shadowsocks, SOCKS и Hysteria2, если ссылка содержит корректные параметры, которые понимает sing-box.
 
 ## Сборка
-
-Для локальной сборки нужны Rust и зависимости Tauri 2:
 
 ```bash
 pnpm install
@@ -26,4 +16,4 @@ pnpm tauri icon src-tauri/icons/potato-mark.svg
 pnpm desktop:build
 ```
 
-GitHub Actions собирает Windows x64 installer и запускает frontend/Rust/Tauri build checks. TUN требует подтверждения UAC. Если на конкретном компьютере TUN не создаётся, приложение должно показать ошибку; для диагностики используйте `diagnostics/windows-network-check.ps1`.
+Администраторские права для proxy-режима не требуются. Приложения, игнорирующие системный proxy, могут продолжать использовать прямое соединение.

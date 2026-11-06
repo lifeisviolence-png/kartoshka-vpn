@@ -25,11 +25,11 @@ export const desktopBridge = {
     if (!isDesktop || !node?.outbound?.server) return null;
     return invoke('test_latency', { host: node.outbound.server, port: Number(node.outbound.server_port || 443) });
   },
-  async probeInternet(mode) {
+  async probeInternet() {
     if (!isDesktop) throw new Error('Preview не может проверить системный VPN');
-    return invoke('probe_internet', { mode });
+    return invoke('probe_internet');
   },
   getCapabilities() {
-    return { tun: false, systemProxy: isDesktop, subscriptionImport: true, geofiles: false, native: isDesktop };
+    return { systemProxy: isDesktop, subscriptionImport: true, geofiles: false, native: isDesktop };
   }
 };
