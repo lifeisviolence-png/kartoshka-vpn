@@ -104,9 +104,8 @@ function render() {
 
 function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char])); }
 
-async function loadSubscription() {
-  const input = document.querySelector('#subscription-url');
-  const url = input?.value.trim();
+async function loadSubscription(inputValue) {
+  const url = (inputValue ?? document.querySelector('#subscription-url')?.value ?? '').trim();
   if (!url) throw new Error('Вставьте ссылку подписки 3x-ui');
   if (!/^(https?:\/\/|vless:\/\/|vmess:\/\/|trojan:\/\/|ss:\/\/)/i.test(url)) {
     throw new Error('Нужна http(s)-ссылка подписки или прямая vless/vmess/trojan/ss-ссылка');
@@ -138,9 +137,10 @@ function bindEvents() {
     render();
   });
   document.querySelector('[data-action="load-subscription"]')?.addEventListener('click', async (event) => {
+    const inputValue = document.querySelector('#subscription-url')?.value ?? '';
     event.currentTarget.disabled = true;
     state.subscriptionMessage = 'Загружаем подписку…'; render();
-    try { await loadSubscription(); state.connection = 'idle'; }
+    try { await loadSubscription(inputValue); state.connection = 'idle'; }
     catch (error) { state.connection = 'error'; state.subscriptionMessage = error.message || 'Не удалось загрузить подписку'; }
     render();
   });
