@@ -1,3 +1,9 @@
+function withoutUndefined(value) {
+  if (Array.isArray(value)) return value.map(withoutUndefined);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).map(([key, item]) => [key, withoutUndefined(item)]));
+  return value;
+}
+
 export function buildSingBoxConfig(nodes, selectedId, routeMode) {
   const selected = nodes.find((node) => node.id === selectedId) || nodes[0];
   if (!selected) throw new Error('В подписке нет поддерживаемых серверов');
@@ -7,22 +13,20 @@ export function buildSingBoxConfig(nodes, selectedId, routeMode) {
     { type: 'block', tag: 'block' }
   ]);
 
-  const route = {
-    auto_detect_interface: true,
-    final: selected.id,
-    rules: [
-      { ip_is_private: true, outbound: 'direct' },
-      { protocol: 'dns', outbound: 'direct' }
-    ]
-  };
+  const rules = [
+    { ip_is_private: true, outbound: 'direct' },
+    { protocol: 'dns', outbound: 'direct' }
+  ];
+  if (routeMode === 'split') rules.push({ domain_suffix: ['.ru', '.рф'], outbound: 'direct' });
 
-  if (routeMode === 'manual') route.final = selected.id;
-  if (routeMode === 'split') route.rules.push({ domain_suffix: ['.ru', '.рф'], outbound: 'direct' });
-
-  return {
-    log: { level: 'warn', timestamp: true },
+  return withoutUndefined({
+    log: { level: 'info', timestamp: true },
     inbounds: [{ type: 'mixed', tag: 'kartoshka-in', listen: '127.0.0.1', listen_port: 2080, set_system_proxy: true }],
     outbounds,
-    route
-  };
+    route: {
+      auto_detect_interface: true,
+      final: selected.id,
+      rules
+    }
+  });
 }

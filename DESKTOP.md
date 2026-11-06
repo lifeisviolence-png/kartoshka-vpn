@@ -1,21 +1,29 @@
-# КартошкаVPN Desktop
+# KartoshkaVPN Desktop v0.4
 
-КартошкаVPN desktop uses Tauri 2 and bundles sing-box as a sidecar. sing-box exposes a local mixed HTTP/SOCKS proxy on `127.0.0.1:2080` and manages the operating-system proxy while connected. TUN is intentionally not enabled in this first native version because the current user workflow relies on proxy mode.
+## Архитектура
 
-## Local development
+Приложение использует Tauri 2 и поставляет sing-box как sidecar. Рабочий режим — локальный mixed HTTP/SOCKS proxy на `127.0.0.1:2080`; при успешном запуске sing-box сам включает системный proxy Windows. Перед отображением статуса «Подключено» native-команда проверяет, что локальный порт действительно поднялся.
 
-A Rust toolchain and the platform prerequisites for Tauri are required. Then run:
+## Поддерживаемый импорт
+
+- subscription URL 3x-ui;
+- VLESS, включая TLS/Reality, WS и gRPC;
+- VMess;
+- Trojan;
+- Shadowsocks;
+- Hysteria2;
+- несколько прямых ссылок построчно.
+
+После импорта приложение сохраняет узлы локально, читает `subscription-userinfo`, показывает срок при наличии заголовка и выполняет TCP-ping каждого узла. TCP-ping измеряет доступность адреса/порта, а не гарантирует успешность всей VPN-сессии.
+
+## Сборка
+
+Для локальной сборки нужны Rust и зависимости Tauri 2:
 
 ```bash
 pnpm install
 pnpm tauri icon src-tauri/icons/potato-mark.svg
-pnpm desktop:dev
+pnpm desktop:build
 ```
 
-The application accepts a 3x-ui subscription URL, decodes common `vless://`, `vmess://`, `trojan://` and `ss://` entries, writes a sing-box configuration, starts the bundled sidecar, and enables the system proxy through sing-box.
-
-## Release builds
-
-GitHub Actions builds Windows x64, macOS Intel and macOS Apple Silicon installers. Push a tag such as `v0.2.0` or start the `Desktop builds` workflow manually. The workflow pins sing-box `1.14.4` and downloads official release archives from the SagerNet repository.
-
-The split-routing option currently keeps private IPs and `.ru`/`.рф` domains direct. Full geosite/geoip rule-set management and signed application updates are intentionally separate follow-up work; the application does not claim TUN support.
+GitHub Actions собирает Windows x64 installer и запускает frontend/Rust/Tauri build checks. В текущем этапе TUN намеренно не включён: рабочий сценарий — proxy, как в HAPP на компьютере пользователя.
