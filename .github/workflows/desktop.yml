@@ -1,0 +1,86 @@
+name: Desktop builds
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SING_BOX_VERSION: 1.14.4
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: sing-box-${{ env.SING_BOX_VERSION }}-windows-amd64.zip
+            binary: sing-box.exe
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: sing-box-${{ env.SING_BOX_VERSION }}-darwin-amd64.tar.gz
+            binary: sing-box
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: sing-box-${{ env.SING_BOX_VERSION }}-darwin-arm64.tar.gz
+            binary: sing-box
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Download sing-box
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          curl -L --fail --retry 3 -o /tmp/sing-box-package "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${{ matrix.archive }}"
+          if [[ "${{ matrix.archive }}" == *.zip ]]; then
+            7z e /tmp/sing-box-package -osrc-tauri/binaries '${{ matrix.binary }}'
+          else
+            tar -xzf /tmp/sing-box-package -C /tmp
+            cp "/tmp/sing-box-${SING_BOX_VERSION}/sing-box" src-tauri/binaries/sing-box
+          fi
+          mv "src-tauri/binaries/${{ matrix.binary }}" "src-tauri/binaries/sing-box-${{ matrix.target }}${{ matrix.binary == 'sing-box.exe' && '.exe' || '' }}"
+          chmod +x src-tauri/binaries/sing-box-${{ matrix.target }}${{ matrix.binary == 'sing-box.exe' && '.exe' || '' }} || true
+      - name: Generate desktop icons
+        run: pnpm tauri icon src-tauri/icons/potato-mark.svg
+      - name: Build and validate Tauri app
+        env:
+          RUST_BACKTRACE: 1
+        run: pnpm tauri build --target ${{ matrix.target }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kartoshka-vpn-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*

@@ -28,8 +28,13 @@
   - Основные элементы одинаково работают в широком и узком окне.
   - Структура подготовлена для последующей упаковки в Tauri или другой desktop-shell.
 
-- [ ] **Нативный desktop-этап**
-  - Подключить реальный локальный SOCKS/HTTP-прокси через sing-box или Xray.
-  - Добавить системное управление прокси для Windows и macOS.
-  - Подключить реальный subscription URL из 3x-ui, дату окончания и geofiles.
+- [x] **Нативный desktop-этап — proxy MVP**
+  - Подключён sing-box sidecar с локальным mixed HTTP/SOCKS-прокси.
+  - Системный прокси Windows/macOS включается самим sing-box через `set_system_proxy`.
+  - Добавлен импорт subscription URL из 3x-ui и разбор vless/vmess/trojan/ss.
+  - Добавлены GitHub Actions для Windows x64, macOS Intel и macOS Apple Silicon.
+
+- [ ] **Следующий сетевой этап**
+  - Подключить полноценные geoip/geosite rule-sets с проверяемыми версиями.
+  - Добавить динамическое отображение срока и трафика из `subscription-userinfo`.
   - Отдельно исследовать TUN/Network Extension, не включая его в качестве рабочего режима по умолчанию.

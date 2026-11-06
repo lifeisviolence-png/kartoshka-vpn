@@ -1,25 +1,28 @@
-/**
- * Browser-safe contract for the future Tauri/native layer.
- * The prototype intentionally returns demo values and never changes system proxy settings.
- * A desktop build can replace this object with a sing-box/Xray process adapter.
- */
+import { invoke } from '@tauri-apps/api/core';
+
+const isDesktop = Boolean(window.__TAURI_INTERNALS__);
+
 export const desktopBridge = {
-  async connect({ serverId, routeMode }) {
-    return { ok: true, serverId, routeMode, transport: 'demo-local-proxy' };
+  async connect({ config }) {
+    if (!isDesktop) return { ok: true, demo: true };
+    await invoke('start_proxy', { configJson: JSON.stringify(config) });
+    return { ok: true, native: true };
   },
   async disconnect() {
-    return { ok: true };
+    if (!isDesktop) return { ok: true, demo: true };
+    await invoke('stop_proxy');
+    return { ok: true, native: true };
   },
   async refreshSubscription() {
-    return { ok: true, source: 'demo-3x-ui-subscription' };
+    return { ok: true };
+  },
+  async fetchSubscription(url) {
+    if (isDesktop) return invoke('fetch_subscription', { url });
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Ошибка подписки: HTTP ${response.status}`);
+    return response.text();
   },
   getCapabilities() {
-    return {
-      tun: false,
-      systemProxy: false,
-      subscriptionImport: false,
-      geofiles: false,
-      note: 'Подключение системного прокси появится в desktop-версии.'
-    };
+    return { tun: false, systemProxy: isDesktop, subscriptionImport: true, geofiles: false, native: isDesktop };
   }
 };
