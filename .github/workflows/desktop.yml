@@ -20,15 +20,15 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: sing-box-${{ env.SING_BOX_VERSION }}-windows-amd64.zip
+            archive: sing-box-1.14.4-windows-amd64.zip
             binary: sing-box.exe
           - os: macos-13
             target: x86_64-apple-darwin
-            archive: sing-box-${{ env.SING_BOX_VERSION }}-darwin-amd64.tar.gz
+            archive: sing-box-1.14.4-darwin-amd64.tar.gz
             binary: sing-box
           - os: macos-14
             target: aarch64-apple-darwin
-            archive: sing-box-${{ env.SING_BOX_VERSION }}-darwin-arm64.tar.gz
+            archive: sing-box-1.14.4-darwin-arm64.tar.gz
             binary: sing-box
     runs-on: ${{ matrix.os }}
     steps:
