@@ -22,14 +22,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: sing-box-1.14.4-windows-amd64.zip
             binary: sing-box.exe
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: sing-box-1.14.4-darwin-amd64.tar.gz
-            binary: sing-box
-          - os: macos-14
-            target: aarch64-apple-darwin
-            archive: sing-box-1.14.4-darwin-arm64.tar.gz
-            binary: sing-box
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -45,6 +37,10 @@ jobs:
           cache: pnpm
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - name: Download sing-box
         shell: bash
         run: |
