@@ -16,17 +16,39 @@ impl Drop for RegistryGuard {
     }
 }
 fn saved() -> Vec<Option<RawValue>> { NAMES.into_iter().map(|name| windows::get(name).unwrap()).collect() }
+fn registry_dump() -> String {
+    NAMES.iter().map(|name| format!("{name}={:?}", windows::get(name).unwrap())).collect::<Vec<_>>().join(", ")
+}
+fn wait_direct(timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let flags = windows::flags().unwrap();
+        if flags == 1 || Instant::now() >= deadline { return flags; }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 fn baseline(case: usize) {
-    // First activate the per-connection flags, then seed exact raw registry values.
-    windows::set_flags(1).unwrap();
+    assert!(case < 2);
+    // A nonempty AutoConfigURL makes WinINet report PROXY_TYPE_AUTO_PROXY_URL even
+    // after FLAGS is written as direct (the observed CI failure: 5 instead of 1).
+    // Clear PAC first, write the flags, then seed the exact raw values under test.
     let server = text("старый proxy:8181;http=пример.example:8888");
     let override_value = text("<local>;*.example.test;10.*");
     windows::set("ProxyServer", &server).unwrap();
     windows::set("ProxyOverride", &override_value).unwrap();
-    windows::set("AutoConfigURL", &if case == 0 { text("http://127.0.0.1:39021/proxy.pac") } else { None }).unwrap();
+    windows::set("AutoConfigURL", &None).unwrap();
+    windows::set_flags(1).unwrap();
     windows::set("AutoDetect", &if case == 0 { dword(0) } else { None }).unwrap();
     windows::set("ProxyEnable", &if case == 0 { dword(0) } else { None }).unwrap();
     windows::notify().unwrap();
+    let flags = wait_direct(Duration::from_secs(2));
+    assert_eq!(flags, 1, "baseline must be direct in FLAGS_UI; flags={flags}; {}", registry_dump());
+    assert_eq!(windows::get("ProxyServer").unwrap(), server);
+    assert_eq!(windows::get("ProxyOverride").unwrap(), override_value);
+    assert_eq!(windows::get("AutoConfigURL").unwrap(), None, "PAC must be absent; {}", registry_dump());
+    assert_eq!(windows::get("AutoDetect").unwrap(), if case == 0 { dword(0) } else { None });
+    assert_eq!(windows::get("ProxyEnable").unwrap(), if case == 0 { dword(0) } else { None });
+    require_direct(&capture_proxy().unwrap()).expect("baseline must pass the production direct check");
 }
 fn empty_runtime() -> ProxyRuntime { ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 } }
 fn disposable_ci() -> bool {
@@ -37,6 +59,19 @@ fn disposable_ci() -> bool {
     if !yes { eprintln!("SKIP: real HKCU tests run only on explicitly authorized disposable GitHub-hosted CI"); }
     yes
 }
+static ENV_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+struct NativeEnv { dir: PathBuf, path: PathBuf, binary: PathBuf, assets: PathBuf, config: String }
+impl NativeEnv {
+    fn new() -> Self {
+        let binary = PathBuf::from(std::env::var_os("XRAY_TEST_BINARY").expect("XRAY_TEST_BINARY is required"));
+        let assets = PathBuf::from(std::env::var_os("XRAY_TEST_ASSETS").expect("XRAY_TEST_ASSETS is required"));
+        let config = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/xray-proxy-smoke.json")).unwrap();
+        let dir = std::env::temp_dir().join(format!("kartoshka-case-{}-{}", std::process::id(), ENV_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+        fs::create_dir_all(&dir).unwrap();
+        Self { path: dir.join("proxy-snapshot.json"), dir, binary, assets, config }
+    }
+}
+impl Drop for NativeEnv { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.dir); } }
 fn local_http_probe() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -74,6 +109,90 @@ fn windows_monitor_retries_transient_errors_without_losing_fault() {
     record_health(&mut reason, &mut errors, MonitorHealth::Fault("lost listener".into()));
     assert_eq!(reason.as_deref(), Some("lost listener"));
 }
+
+// Each unsafe mode is set up and refused independently: a failure in one case does
+// not hide whether the others were actually exercised. Every test owns its registry
+// snapshot and restores the runner's exact original values on drop.
+fn refusal_case(mode: &str) {
+    let _guard = RegistryGuard::capture();
+    let env = NativeEnv::new();
+    baseline(0);
+    let bit = match mode {
+        "proxy" => { windows::set_flags(2).unwrap(); 2 }
+        "pac" => {
+            windows::set("AutoConfigURL", &text("http://127.0.0.1:39021/proxy.pac")).unwrap();
+            windows::set_flags(1 | 4).unwrap();
+            4
+        }
+        "autodetect" => {
+            windows::set("AutoDetect", &dword(1)).unwrap();
+            windows::set_flags(1 | 8).unwrap();
+            8
+        }
+        _ => unreachable!(),
+    };
+    windows::notify().unwrap();
+    let before = saved();
+    let observed = windows::flags().unwrap();
+    assert_ne!(observed & bit, 0, "{mode}: WinINet did not activate bit {bit} (flags={observed}); {}", registry_dump());
+    let error = start_runtime(&mut empty_runtime(), &env.binary, &env.assets, &env.path, &env.config, None).unwrap_err();
+    assert!(error.contains("заблокировано"), "{mode}: {error}");
+    assert_eq!(saved(), before, "{mode}: third-party settings must be untouched");
+    assert_eq!(windows::flags().unwrap(), observed, "{mode}: WinINet flags must be untouched");
+    assert!(!env.path.exists(), "{mode}: a blocked start must not create a snapshot");
+    println!("PASS refused active {mode} (flags={observed})");
+}
+#[test]
+fn windows_refuses_active_third_party_proxy() {
+    if !disposable_ci() { return; }
+    let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
+    refusal_case("proxy");
+}
+#[test]
+fn windows_refuses_active_pac() {
+    if !disposable_ci() { return; }
+    let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
+    refusal_case("pac");
+}
+#[test]
+fn windows_refuses_active_autodetect() {
+    if !disposable_ci() { return; }
+    let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
+    refusal_case("autodetect");
+}
+#[test]
+fn windows_refuses_restore_when_another_app_changes_flags() {
+    if !disposable_ci() { return; }
+    let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
+    let _guard = RegistryGuard::capture();
+    let env = NativeEnv::new();
+    baseline(0);
+    let original = saved();
+    let snapshot = capture_proxy().unwrap();
+    save_snapshot(&env.path, &snapshot).unwrap();
+    // Another VPN enables a PAC while our snapshot is unresolved.
+    windows::set("AutoConfigURL", &text("http://third-party.example/proxy.pac")).unwrap();
+    windows::set_flags(1 | 4).unwrap();
+    windows::notify().unwrap();
+    let current = saved();
+    let current_flags = windows::flags().unwrap();
+    assert_ne!(current_flags & 4, 0, "runner must activate PAC: {current_flags}");
+    let error = restore_snapshot(&env.path).unwrap_err();
+    assert!(error.contains("snapshot сохранён"), "{error}");
+    assert_eq!(saved(), current, "third-party settings must not be overwritten");
+    assert_eq!(windows::flags().unwrap(), current_flags);
+    assert!(env.path.exists(), "an unresolved snapshot must be retained");
+    // Return to the exact baseline this test owns, then recovery must succeed.
+    for (name, value) in NAMES.into_iter().zip(&original) { windows::set(name, value).unwrap(); }
+    windows::set_flags(1).unwrap();
+    windows::notify().unwrap();
+    assert_eq!(saved(), original);
+    assert_eq!(windows::flags().unwrap(), 1);
+    restore_snapshot(&env.path).unwrap();
+    assert!(!env.path.exists());
+    println!("PASS foreign PAC refused, snapshot retained, recovery after manual cleanup");
+}
+
 #[test]
 fn windows_xray_real_registry_transaction_and_rollback() {
     if !disposable_ci() { return; }
@@ -100,17 +219,16 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     invalid["api"] = serde_json::json!({"tag":"bad"});
     assert!(validate_config(&invalid.to_string()).is_err());
     assert!(validate_config(&"x".repeat(MAX_CONFIG_BYTES + 1)).unwrap_err().contains("лимит"));
-    for flags in [2, 1 | 4, 1 | 8] {
+    // FLAGS_UI may reflect a real registry write, so exercise contradictory captured
+    // indicators without weakening the production require_direct check.
+    for name in ["ProxyEnable", "AutoDetect"] {
         baseline(0);
-        windows::set_flags(flags).unwrap();
-        let before = saved();
-        let observed_flags = windows::flags().unwrap();
-        assert_ne!(observed_flags, 1, "runner must actually enable this WinINet mode");
-        let error = start_runtime(&mut empty_runtime(), &binary, &assets, &path, &config, None).unwrap_err();
-        assert!(error.contains("заблокировано"), "{error}");
-        assert_eq!(saved(), before, "active third-party settings must be untouched");
-        assert_eq!(windows::flags().unwrap(), observed_flags);
-        assert!(!path.exists());
+        let mut snapshot = capture_proxy().unwrap();
+        assert_eq!(snapshot.before_flags, 1);
+        snapshot.changes.iter_mut().find(|change| change.name == name).unwrap().before = dword(1);
+        let error = require_direct(&snapshot).unwrap_err();
+        assert!(error.contains("заблокировано"), "{name}: {error}");
+        assert_eq!(windows::flags().unwrap(), 1, "synthetic conflict must not alter WinINet");
     }
     baseline(0);
     windows::set("ProxyServer", &text("third.example")).unwrap();
@@ -129,14 +247,17 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     assert!(path.exists());
     // This test owns both the synthetic VPN and snapshot; return to the exact
     // baseline before continuing. Never perform this unconditionally in product.
-    windows::set_flags(1).unwrap();
     for (name, value) in NAMES.into_iter().zip(&original) { windows::set(name, value).unwrap(); }
+    windows::set_flags(1).unwrap();
+    assert_eq!(saved(), original, "synthetic cleanup must reproduce the baseline");
+    assert_eq!(windows::flags().unwrap(), 1);
     restore_snapshot(&path).unwrap();
-    println!("PASS active proxy/PAC/autodetect refused; same-server active VPN preserved");
+    println!("PASS same-server active VPN preserved; snapshot not misattributed");
     for case in 0..2 {
         baseline(case);
         let original = saved();
         let original_flags = windows::flags().unwrap();
+        assert_eq!(original_flags, 1, "case {case} must start direct");
         let mut runtime = empty_runtime();
         start_runtime(&mut runtime, &binary, &assets, &path, &config, None).expect("start against real registry");
         assert_eq!(windows::flags().unwrap(), 2, "WinINet must use only the local proxy");
@@ -160,6 +281,7 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     let error = start_runtime(&mut runtime, &binary, &assets, &path, &config, Some(2)).unwrap_err();
     assert!(error.contains("Тестовая ошибка"), "{error}");
     assert_eq!(saved(), original, "partial write rolled back");
+    assert_eq!(windows::flags().unwrap(), 1, "partial write must restore direct WinINet flags");
     assert!(!path.exists());
     assert!(TcpListener::bind("127.0.0.1:2080").is_ok(), "failed startup left 2080 occupied");
     println!("PASS injected write failure: child killed and registry restored");
