@@ -1,0 +1,8 @@
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    { "tag": "http-in", "listen": "127.0.0.1", "port": 2080, "protocol": "http", "settings": { "allowTransparent": false } },
+    { "tag": "socks-in", "listen": "127.0.0.1", "port": 2081, "protocol": "socks", "settings": { "auth": "noauth", "udp": true, "ip": "127.0.0.1" } }
+  ],
+  "outbounds": [{ "tag": "direct", "protocol": "freedom" }]
+}
