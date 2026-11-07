@@ -318,10 +318,16 @@ mod windows {
     impl Drop for Instance { fn drop(&mut self) { unsafe { CloseHandle(self.0); } } }
     // A named object is held for the whole process, not merely while changing values.
     pub fn one_instance() -> Result<Instance, String> {
-        let handle = unsafe { CreateMutexW(ptr::null(), 0, wide(INSTANCE_NAME).as_ptr()) };
-        if handle == 0 { return Err(format!("Не удалось заблокировать второй экземпляр: {}", io::Error::last_os_error())); }
-        if unsafe { GetLastError() } == ALREADY_EXISTS { unsafe { CloseHandle(handle); } return Err("Уже запущен другой экземпляр КартошкаVPN".into()); }
-        Ok(Instance(handle))
+        // A terminating instance can keep the named object alive for a moment; a
+        // short retry avoids a false "already running" after a crash or update.
+        for attempt in 0..20 {
+            let handle = unsafe { CreateMutexW(ptr::null(), 0, wide(INSTANCE_NAME).as_ptr()) };
+            if handle == 0 { return Err(format!("Не удалось заблокировать второй экземпляр: {}", io::Error::last_os_error())); }
+            if unsafe { GetLastError() } != ALREADY_EXISTS { return Ok(Instance(handle)); }
+            unsafe { CloseHandle(handle); }
+            if attempt < 19 { std::thread::sleep(std::time::Duration::from_millis(250)); }
+        }
+        Err("Уже запущен другой экземпляр КартошкаVPN".into())
     }
 }
 #[cfg(not(windows))]
@@ -392,6 +398,17 @@ fn same_indicator(name: &str, a: &Option<RawValue>, b: &Option<RawValue>) -> boo
         Some(value) => value.kind == 4 && value.bytes == 0u32.to_le_bytes(),
     };
     zero(a) && zero(b)
+}
+// WinINet may serve FLAGS_UI from a per-process cache right after a write. Give
+// the settings-changed notification a bounded moment to settle instead of
+// reporting a conflict against our own change.
+fn wait_flags(expected: u32, timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let flags = windows::flags().unwrap_or(0);
+        if flags == expected || Instant::now() >= deadline { return flags; }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 fn save_snapshot(path: &Path, snapshot: &ProxySnapshot) -> Result<(), String> {
     let json = serde_json::to_vec(snapshot).map_err(|e| e.to_string())?;
@@ -471,6 +488,8 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
         verify(&expected, flags)?;
         if flags == snapshot.applied_flags && flags != snapshot.before_flags {
             windows::set_flags(snapshot.before_flags)?;
+            let restored = wait_flags(snapshot.before_flags, Duration::from_secs(2));
+            if restored != snapshot.before_flags { return Err(format!("WinINet не вернул прежние флаги: {restored}")); }
             // WinINet may update related registry fields when restoring flags. Only
             // accept unchanged values, exact originals, or its ProxyEnable form.
             for (i, c) in managed.iter().enumerate() {
@@ -519,12 +538,14 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
     for c in &snapshot.changes {
         if !same_indicator(&c.name, &windows::get(&c.name)?, &c.before) { return Err(format!("{} изменился во время запуска; proxy не включён", c.name)); }
     }
-    if windows::flags()? != snapshot.before_flags { return Err("Флаги WinINet изменились во время запуска".into()); }
+    let current_flags = windows::flags()?;
+    if current_flags != snapshot.before_flags { return Err(format!("Флаги WinINet изменились во время запуска: {current_flags} вместо {}", snapshot.before_flags)); }
     let mut writes = 0;
     let mut completed: Vec<&str> = Vec::new();
     for c in snapshot.changes.iter().filter(|c| c.managed) {
         check_watchdog(watchdog)?;
-        if windows::flags()? != snapshot.before_flags { return Err("Флаги WinINet изменились во время запуска".into()); }
+        let current_flags = windows::flags()?;
+        if current_flags != snapshot.before_flags { return Err(format!("Флаги WinINet изменились во время запуска: {current_flags} вместо {}", snapshot.before_flags)); }
         // Check the whole set again before each step. This narrows, but cannot eliminate,
         // races with external programs because Windows Registry has no compare-and-swap.
         for check in &snapshot.changes {
@@ -535,14 +556,16 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
         completed.push(&c.name);
         if fail_after == Some(writes) { return Err("Тестовая ошибка записи proxy".into()); }
     }
-    if windows::flags()? != snapshot.before_flags { return Err("Флаги WinINet изменились во время запуска".into()); }
+    let current_flags = windows::flags()?;
+    if current_flags != snapshot.before_flags { return Err(format!("Флаги WinINet изменились во время запуска: {current_flags} вместо {}", snapshot.before_flags)); }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
         if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился до включения WinINet", c.name)); }
     }
     check_watchdog(watchdog)?;
     windows::set_flags(snapshot.applied_flags)?;
-    if windows::flags()? != snapshot.applied_flags { return Err("WinINet не включил локальный proxy".into()); }
+    let applied = wait_flags(snapshot.applied_flags, Duration::from_secs(2));
+    if applied != snapshot.applied_flags { return Err(format!("WinINet не включил локальный proxy: флаги {applied}")); }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
         if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился при включении WinINet", c.name)); }

@@ -131,7 +131,9 @@ jobs:
             "Task SID=$sid; task process IsProcessInJob=$inJob; watchdog independence is separately verified" | Out-File -Encoding utf8 $c.log
             $env:CI='true'; $env:GITHUB_ACTIONS='true'; $env:RUNNER_ENVIRONMENT='github-hosted'; $env:KARTOVPN_DISPOSABLE_WINDOWS_CI='1'
             $env:RUST_BACKTRACE='1'; $env:KARTOVPN_WATCHDOG_TEST_EXE=$c.watcher; $env:XRAY_TEST_BINARY=$c.xray; $env:XRAY_TEST_ASSETS=$c.assets
-            & $c.exe windows_native_tests:: --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $c.log -Append
+            # Redirect to a file instead of piping: a leftover child holding the
+            # console handle must not keep the PowerShell pipeline (and the task) open.
+            & $c.exe windows_native_tests:: --nocapture --test-threads=1 *> $c.log
             $code = $LASTEXITCODE
           } catch { $_ | Out-String | Out-File -Encoding utf8 $c.log -Append; $code = 1 }
           finally { Set-Content -Path $c.result -Value $code }
@@ -144,7 +146,7 @@ jobs:
             $startDeadline = (Get-Date).AddSeconds(30)
             while (-not (Test-Path $started) -and (Get-Date) -lt $startDeadline) { Start-Sleep -Milliseconds 250 }
             if (-not (Test-Path $started)) { $info = Get-ScheduledTaskInfo -TaskName $taskName | Out-String; throw "Same-user interactive scheduled task did not start. An interactive runner session is required; no S4U/SYSTEM fallback. $info" }
-            $deadline = (Get-Date).AddMinutes(8)
+            $deadline = (Get-Date).AddMinutes(5)
             while (-not (Test-Path $result) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
             if (-not (Test-Path $result)) { throw 'Windows native scheduled test timed out' }
             $code = [int](Get-Content -Raw $result).Trim()
@@ -153,6 +155,7 @@ jobs:
           } finally {
             if (Test-Path $started) { $pidText = (Get-Content -Raw $started).Trim(); if ($pidText -match '^\d+$' -and -not (Test-Path $result)) { & taskkill.exe /PID $pidText /T /F 2>&1 | Out-Null } }
             Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            Get-Process -Name 'kartoshka-vpn' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             if ((Test-Path $log) -and -not (Test-Path windows-smoke.log)) { Copy-Item $log windows-smoke.log }
             Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

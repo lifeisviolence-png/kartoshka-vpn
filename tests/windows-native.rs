@@ -345,8 +345,16 @@ impl std::ops::Deref for ChildGuard { type Target = Child; fn deref(&self) -> &C
 impl std::ops::DerefMut for ChildGuard { fn deref_mut(&mut self) -> &mut Child { &mut self.0 } }
 impl Drop for ChildGuard { fn drop(&mut self) { let _ = stop_child(&mut self.0); } }
 fn kill_pid(pid: u32) {
-    let result = Command::new("taskkill.exe").args(["/PID", &pid.to_string(), "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+    let result = Command::new("taskkill.exe").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
     assert!(result.success(), "taskkill failed for PID {pid}");
+}
+fn wait_child_exit(child: &mut Child, timeout: Duration, what: &str) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait().unwrap().is_some() { return; }
+        if Instant::now() >= deadline { let _ = stop_child(child); panic!("{what} did not exit within {timeout:?}"); }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 fn wait_restore(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -372,7 +380,9 @@ fn windows_watchdog_mock_core() {
         drop(first);
         fs::write(dir.join("listener-closed"), b"closed").unwrap();
     }
-    loop { std::thread::sleep(Duration::from_secs(1)); }
+    // Never outlive the test run: an orphan here would keep the CI job open.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline { std::thread::sleep(Duration::from_secs(1)); }
 }
 #[test]
 fn windows_config_stdin_bounded_and_cleanup() {
@@ -435,6 +445,7 @@ fn windows_watchdog_mock_host() {
         loop { std::thread::sleep(Duration::from_secs(1)); }
     }
     let mut runtime = empty_runtime();
+    println!("mock host: flags before activation {:?}, values {:?}", windows::flags(), saved());
     activate_guarded(&mut runtime, core, &dir.join("proxy-snapshot.json"), None, if listen { &[2080, 2081] } else { &[] }).expect("mock activation/watchdog handshake failed");
     if std::env::var_os("KARTOVPN_MOCK_RESTORED_BEFORE_DISARM").is_some() {
         let _lock = windows::lock().unwrap();
@@ -444,7 +455,8 @@ fn windows_watchdog_mock_host() {
     let watcher = windows::child_identity(runtime.watchdog.as_ref().unwrap()).unwrap();
     fs::write(dir.join("ready.tmp"), format!("{} {} {} {}", core.0, core.1, watcher.0, watcher.1)).unwrap();
     fs::rename(dir.join("ready.tmp"), dir.join("ready")).unwrap();
-    loop {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
         if listen && !dir.join("inspect-now").exists() { continue; }
         let health = inspect_runtime(&mut runtime);
@@ -546,7 +558,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
     let ids = fs::read_to_string(dir.join("ready")).unwrap().split_whitespace().map(|s| s.parse::<u64>().unwrap()).collect::<Vec<_>>();
     assert_eq!(ids.len(), 2);
     let pre_core = windows::test_process(ids[0] as u32, ids[1]).unwrap();
-    kill_pid(host.id()); host.wait().unwrap();
+    kill_pid(host.id()); wait_child_exit(&mut host, Duration::from_secs(10), "mock host");
     assert!(pre_core.wait(10_000), "Job must kill core even before watchdog exists");
     assert_saved(&before, "registry must keep the baseline");
     assert_eq!(windows::flags().unwrap(), flags);
@@ -565,6 +577,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
         if case == "listener" { command.env("KARTOVPN_MOCK_LISTEN", "1"); }
         if case == "after-restore" { command.env("KARTOVPN_MOCK_RESTORED_BEFORE_DISARM", "1"); }
         let log = fs::File::create(dir.join("host.log")).unwrap();
+        println!("{case}: parent flags before spawn {:?}", windows::flags());
         command.stdout(Stdio::from(log.try_clone().unwrap())).stderr(Stdio::from(log));
         let mut host = ChildGuard(command.spawn().unwrap());
         wait_file(&dir.join("ready"), Duration::from_secs(20));
@@ -595,7 +608,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
             }
             windows::set("ProxyServer", &text(LOCAL_PROXY)).unwrap();
             wait_restore(&path);
-            host.wait().unwrap();
+            wait_child_exit(&mut host, Duration::from_secs(30), "mock host");
             assert!(core_handle.wait(5000) && watchdog_handle.wait(5000));
         } else if case == "listener" {
             fs::write(dir.join("drop-2080"), b"drop").unwrap();
@@ -606,18 +619,18 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
             assert_eq!(fs::read_to_string(dir.join("result")).unwrap(), "restored");
             assert!(fs::read_to_string(dir.join("health")).unwrap().contains("2080"));
             wait_restore(&path);
-            host.wait().unwrap();
+            wait_child_exit(&mut host, Duration::from_secs(30), "mock host");
             assert!(core_handle.wait(5000) && watchdog_handle.wait(5000));
             drop(replacement);
         } else {
             match case {
-                "host" | "partial" | "after-restore" => { kill_pid(host.id()); host.wait().unwrap(); },
+                "host" | "partial" | "after-restore" => { kill_pid(host.id()); wait_child_exit(&mut host, Duration::from_secs(10), "mock host"); },
                 "core" => kill_pid(ids[0] as u32),
                 "watchdog" => kill_pid(ids[2] as u32),
                 _ => unreachable!(),
             }
             wait_restore(&path);
-            if case != "host" && case != "partial" && case != "after-restore" { wait_file(&dir.join("result"), Duration::from_secs(20)); assert_eq!(fs::read_to_string(dir.join("result")).unwrap(), "restored"); host.wait().unwrap(); }
+            if case != "host" && case != "partial" && case != "after-restore" { wait_file(&dir.join("result"), Duration::from_secs(20)); assert_eq!(fs::read_to_string(dir.join("result")).unwrap(), "restored"); wait_child_exit(&mut host, Duration::from_secs(30), "mock host"); }
             assert!(watchdog_handle.wait(10_000), "watchdog must terminate");
             assert!(core_handle.wait(10_000), "mock core must terminate after successful recovery");
         }
