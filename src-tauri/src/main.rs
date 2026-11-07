@@ -910,6 +910,67 @@ async fn test_latency(host: String, port: u16) -> Result<Option<u32>, String> {
     let started = Instant::now();
     match timeout(Duration::from_secs(5), TcpStream::connect((host.as_str(), port))).await { Ok(Ok(_)) => Ok(Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32)), _ => Ok(None) }
 }
+
+// Xray 26 removed allowInsecure: a node that relied on it stays usable only if
+// the certificate is pinned. Pinning happens on first connect (TOFU): the
+// handshake below records the leaf certificate and never sends data. The pin is
+// stored with the node, so later connections cannot be silently redirected.
+#[derive(Debug)]
+struct CertCapture(std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
+impl rustls::client::danger::ServerCertVerifier for CertCapture {
+    fn verify_server_cert(&self, end_entity: &rustls::pki_types::CertificateDer<'_>, _intermediates: &[rustls::pki_types::CertificateDer<'_>], _server_name: &rustls::pki_types::ServerName<'_>, _ocsp: &[u8], _now: rustls::pki_types::UnixTime) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if let Ok(mut slot) = self.0.lock() { *slot = Some(end_entity.as_ref().to_vec()); }
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(&self, _message: &[u8], _cert: &rustls::pki_types::CertificateDer<'_>, _dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(&self, _message: &[u8], _cert: &rustls::pki_types::CertificateDer<'_>, _dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
+    }
+}
+#[tauri::command]
+async fn pin_peer_certificate(host: String, port: u16, server_name: String) -> Result<String, String> {
+    let host = host.trim().trim_matches(['[', ']']).to_string();
+    if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_whitespace() || matches!(c, '/' | '@' | '#' | '?')) { return Err("Некорректный адрес сервера для проверки сертификата".into()); }
+    if port == 0 { return Err("Некорректный порт для проверки сертификата".into()); }
+    let name = if server_name.trim().is_empty() { host.clone() } else { server_name.trim().to_string() };
+    let server = rustls::pki_types::ServerName::try_from(name.clone()).map_err(|_| "Некорректное имя сервера для проверки сертификата".to_string())?;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(CertCapture(captured.clone())))
+        .with_no_client_auth();
+    let stream = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect((host.as_str(), port))).await
+        .map_err(|_| "Сервер не ответил за 10 секунд при проверке сертификата".to_string())?
+        .map_err(|e| format!("Не удалось подключиться для проверки сертификата: {e}"))?;
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let _tls = tokio::time::timeout(Duration::from_secs(10), connector.connect(server, stream)).await
+        .map_err(|_| "TLS-соединение не установлено за 10 секунд".to_string())?
+        .map_err(|e| format!("Сервер не принял TLS-соединение: {e}"))?;
+    let cert = captured.lock().map_err(|_| "Ошибка состояния проверки сертификата".to_string())?.clone()
+        .ok_or_else(|| "Сервер не передал сертификат".to_string())?;
+    Ok(format_pin(&cert))
+}
+// Xray expects the certificate hash as colon-separated lowercase hex, the same
+// shape `openssl x509 -fingerprint -sha256` prints.
+fn format_pin(der: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(der).iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(":")
+}
+#[cfg(test)]
+mod pin_tests {
+    use super::format_pin;
+    #[test]
+    fn pin_is_sha256_with_colons() {
+        assert_eq!(format_pin(b"abc"), "ba:78:16:bf:8f:01:cf:ea:41:41:40:de:5d:ae:22:23:b0:03:61:a3:96:17:7a:9c:b4:10:ff:61:f2:00:15:ad");
+        assert_eq!(format_pin(b""), "e3:b0:c4:42:98:fc:1c:14:9a:fb:f4:c8:99:6f:b9:24:27:ae:41:e4:64:9b:93:4c:a4:95:99:1b:78:52:b8:55");
+    }
+}
 #[tauri::command]
 async fn probe_internet() -> Result<String, String> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(12)).proxy(reqwest::Proxy::all(format!("http://{LOCAL_PROXY}")).map_err(|e| e.to_string())?).build().map_err(|e| e.to_string())?;
@@ -1005,7 +1066,7 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let _instance = match windows::one_instance() { Ok(v) => v, Err(e) => { windows::show_error(&e); return; } };
-    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 })))).invoke_handler(tauri::generate_handler![fetch_subscription, test_latency, test_proxy_latency, probe_internet, read_logs, start_proxy, stop_proxy]).setup(|app| {
+    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 })))).invoke_handler(tauri::generate_handler![fetch_subscription, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, start_proxy, stop_proxy]).setup(|app| {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }

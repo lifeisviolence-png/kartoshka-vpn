@@ -22,6 +22,10 @@ export const desktopBridge = {
     if (!response.ok) throw new Error(`Сервер подписки вернул HTTP ${response.status}`);
     return { body: await response.text(), userinfo: response.headers.get('subscription-userinfo') };
   },
+  async pinCertificate({ host, port, serverName }) {
+    if (!isDesktop) throw new Error('Preview не может проверить сертификат сервера');
+    return invoke('pin_peer_certificate', { host, port: Number(port), serverName: String(serverName || host) });
+  },
   async pingNode(node) {
     if (!isDesktop || !node?.outbound?.server) return null;
     return invoke('test_latency', { host: node.outbound.server, port: Number(node.outbound.server_port || 443) });

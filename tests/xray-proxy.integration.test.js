@@ -124,7 +124,7 @@ test('split отправляет .ru напрямую, а не-RU — выбра
     const node = parseSubscriptionDetailed(`vless://33333333-3333-4333-8333-333333333333@127.0.0.1:${port}?security=none#fixture`).nodes[0];
     const config = buildXrayConfig([node], node.id, 'split'); config.log.loglevel = 'none';
     // Test-only deterministic DNS: no external queries or changes to the host resolver.
-    config.dns = { hosts: { 'split-fixture.ru':'127.0.0.1', 'proxy-fixture.invalid':'127.0.0.1' } };
+    config.dns = { hosts: { 'split-fixture.ru':'127.0.0.1', 'proxy-fixture.invalid':'198.51.100.7' } };
     config.outbounds[1].streamSettings = { sockopt:{domainStrategy:'UseIPv4'} };
     const path = join(dir,'client.json'); writeFileSync(path, JSON.stringify(config), {mode:0o600});
     client = spawn(process.env.XRAY_TEST_BIN, ['run','-config',path], {stdio:'ignore'}); await waitForPort(2080, client);
