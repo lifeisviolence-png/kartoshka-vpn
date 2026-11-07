@@ -183,12 +183,13 @@ fn windows_refuses_restore_when_another_app_changes_flags() {
     assert_eq!(windows::flags().unwrap(), current_flags);
     assert!(env.path.exists(), "an unresolved snapshot must be retained");
     // Return to the exact baseline this test owns, then recovery must succeed.
-    for (name, value) in NAMES.into_iter().zip(&original) { windows::set(name, value).unwrap(); }
+    // FLAGS first: writing flags afterwards makes WinINet drop zero indicators.
     windows::set_flags(1).unwrap();
+    for (name, value) in NAMES.into_iter().zip(&original) { windows::set(name, value).unwrap(); }
     windows::notify().unwrap();
-    assert_eq!(saved(), original);
     assert_eq!(windows::flags().unwrap(), 1);
     restore_snapshot(&env.path).unwrap();
+    assert_eq!(saved(), original, "recovery must reproduce the exact baseline");
     assert!(!env.path.exists());
     println!("PASS foreign PAC refused, snapshot retained, recovery after manual cleanup");
 }
@@ -247,11 +248,12 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     assert!(path.exists());
     // This test owns both the synthetic VPN and snapshot; return to the exact
     // baseline before continuing. Never perform this unconditionally in product.
-    for (name, value) in NAMES.into_iter().zip(&original) { windows::set(name, value).unwrap(); }
+    // FLAGS first: writing flags afterwards makes WinINet drop zero indicators.
     windows::set_flags(1).unwrap();
-    assert_eq!(saved(), original, "synthetic cleanup must reproduce the baseline");
+    for (name, value) in NAMES.into_iter().zip(&original) { windows::set(name, value).unwrap(); }
     assert_eq!(windows::flags().unwrap(), 1);
     restore_snapshot(&path).unwrap();
+    assert_eq!(saved(), original, "synthetic cleanup must reproduce the baseline");
     println!("PASS same-server active VPN preserved; snapshot not misattributed");
     for case in 0..2 {
         baseline(case);

@@ -388,6 +388,19 @@ fn require_direct(snapshot: &ProxySnapshot) -> Result<(), String> {
     }
     Ok(())
 }
+// WinINet normalizes zero-valued indicator DWORDs: setting FLAGS to direct can
+// delete AutoDetect/ProxyEnable instead of storing an explicit 0. An absent value
+// and 0 describe the same setting, so that difference alone does not prove that
+// another program changed the proxy.
+fn same_indicator(name: &str, a: &Option<RawValue>, b: &Option<RawValue>) -> bool {
+    if a == b { return true; }
+    if !matches!(name, "AutoDetect" | "ProxyEnable") { return false; }
+    let zero = |value: &Option<RawValue>| match value {
+        None => true,
+        Some(value) => value.kind == 4 && value.bytes == 0u32.to_le_bytes(),
+    };
+    zero(a) && zero(b)
+}
 fn save_snapshot(path: &Path, snapshot: &ProxySnapshot) -> Result<(), String> {
     let json = serde_json::to_vec(snapshot).map_err(|e| e.to_string())?;
     let mut data = b"KPV3-DPAPI\0".to_vec();
@@ -458,7 +471,7 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     let verify = |expected: &[Option<RawValue>], expected_flags: u32| -> Result<(), String> {
         if windows::flags()? != expected_flags { return Err("Флаги WinINet изменились во время восстановления".into()); }
         for (c, value) in managed.iter().zip(expected) {
-            if windows::get(&c.name)? != *value { return Err(format!("{} изменён другой программой во время восстановления", c.name)); }
+            if !same_indicator(&c.name, &windows::get(&c.name)?, value) { return Err(format!("{} изменён другой программой во время восстановления", c.name)); }
         }
         Ok(())
     };
@@ -470,7 +483,7 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
             // accept unchanged values, exact originals, or its ProxyEnable form.
             for (i, c) in managed.iter().enumerate() {
                 let current = windows::get(&c.name)?;
-                if current == expected[i] || current == c.before || (c.name == "ProxyEnable" && current == dword(u32::from(snapshot.before_flags & 2 != 0))) {
+                if same_indicator(&c.name, &current, &expected[i]) || same_indicator(&c.name, &current, &c.before) || (c.name == "ProxyEnable" && current == dword(u32::from(snapshot.before_flags & 2 != 0))) {
                     expected[i] = current;
                 } else { return Err(format!("{} изменён во время восстановления флагов", c.name)); }
             }
@@ -512,7 +525,7 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
 fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog: &mut Child) -> Result<(), String> {
     // Detect changes since capture, including the bypass list, before making writes.
     for c in &snapshot.changes {
-        if windows::get(&c.name)? != c.before { return Err(format!("{} изменился во время запуска; proxy не включён", c.name)); }
+        if !same_indicator(&c.name, &windows::get(&c.name)?, &c.before) { return Err(format!("{} изменился во время запуска; proxy не включён", c.name)); }
     }
     if windows::flags()? != snapshot.before_flags { return Err("Флаги WinINet изменились во время запуска".into()); }
     let mut writes = 0;
@@ -524,7 +537,7 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
         // races with external programs because Windows Registry has no compare-and-swap.
         for check in &snapshot.changes {
             let expected = if completed.contains(&check.name.as_str()) { &check.applied } else { &check.before };
-            if &windows::get(&check.name)? != expected { return Err(format!("{} изменился во время запуска", check.name)); }
+            if !same_indicator(&check.name, &windows::get(&check.name)?, expected) { return Err(format!("{} изменился во время запуска", check.name)); }
         }
         if c.before != c.applied { windows::set(&c.name, &c.applied)?; writes += 1; }
         completed.push(&c.name);
@@ -533,14 +546,14 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
     if windows::flags()? != snapshot.before_flags { return Err("Флаги WinINet изменились во время запуска".into()); }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
-        if &windows::get(&c.name)? != expected { return Err(format!("{} изменился до включения WinINet", c.name)); }
+        if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился до включения WinINet", c.name)); }
     }
     check_watchdog(watchdog)?;
     windows::set_flags(snapshot.applied_flags)?;
     if windows::flags()? != snapshot.applied_flags { return Err("WinINet не включил локальный proxy".into()); }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
-        if &windows::get(&c.name)? != expected { return Err(format!("{} изменился при включении WinINet", c.name)); }
+        if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился при включении WinINet", c.name)); }
     }
     windows::notify()?;
     check_watchdog(watchdog)
