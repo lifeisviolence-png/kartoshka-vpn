@@ -371,7 +371,8 @@ fn capture_proxy() -> Result<ProxySnapshot, String> {
         };
         changes.push(Change { name: name.into(), before, applied, managed });
     }
-    if windows::flags()? != before_flags { return Err("Флаги WinINet изменились во время создания snapshot".into()); }
+    let after_flags = windows::flags()?;
+    if has_pac(after_flags) != has_pac(before_flags) { return Err("Флаги WinINet изменились во время создания snapshot".into()); }
     Ok(ProxySnapshot { version: 2, changes, before_flags, applied_flags: 2 })
 }
 fn require_direct(snapshot: &ProxySnapshot) -> Result<(), String> {
@@ -399,14 +400,25 @@ fn same_indicator(name: &str, a: &Option<RawValue>, b: &Option<RawValue>) -> boo
     };
     zero(a) && zero(b)
 }
-// WinINet may serve FLAGS_UI from a per-process cache right after a write. Give
-// the settings-changed notification a bounded moment to settle instead of
-// reporting a conflict against our own change.
-fn wait_flags(expected: u32, timeout: Duration) -> u32 {
+// FLAGS_UI is a derived value: with ProxyServer configured but ProxyEnable=0 it
+// can report direct|proxy (3), and it can lag a write briefly. The safety property
+// is the absence of PAC/auto-detect and the registry values themselves, so checks
+// look at those bits instead of comparing the whole word.
+const PAC_BITS: u32 = 4 | 8;
+fn has_pac(flags: u32) -> bool { flags & PAC_BITS != 0 }
+fn wait_no_pac(timeout: Duration) -> u32 {
     let deadline = Instant::now() + timeout;
     loop {
         let flags = windows::flags().unwrap_or(0);
-        if flags == expected || Instant::now() >= deadline { return flags; }
+        if !has_pac(flags) || Instant::now() >= deadline { return flags; }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+fn wait_local_proxy(timeout: Duration) -> u32 {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let flags = windows::flags().unwrap_or(0);
+        if flags & 2 != 0 && !has_pac(flags) || Instant::now() >= deadline { return flags; }
         std::thread::sleep(Duration::from_millis(25));
     }
 }
@@ -478,7 +490,7 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
         }
     }
     let verify = |expected: &[Option<RawValue>], expected_flags: u32| -> Result<(), String> {
-        if windows::flags()? != expected_flags { return Err("Флаги WinINet изменились во время восстановления".into()); }
+        if has_pac(windows::flags()?) != has_pac(expected_flags) { return Err("Флаги WinINet изменились во время восстановления".into()); }
         for (c, value) in managed.iter().zip(expected) {
             if !same_indicator(&c.name, &windows::get(&c.name)?, value) { return Err(format!("{} изменён другой программой во время восстановления", c.name)); }
         }
@@ -488,8 +500,8 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
         verify(&expected, flags)?;
         if flags == snapshot.applied_flags && flags != snapshot.before_flags {
             windows::set_flags(snapshot.before_flags)?;
-            let restored = wait_flags(snapshot.before_flags, Duration::from_secs(2));
-            if restored != snapshot.before_flags { return Err(format!("WinINet не вернул прежние флаги: {restored}")); }
+            let restored = wait_no_pac(Duration::from_secs(2));
+            if has_pac(restored) != has_pac(snapshot.before_flags) { return Err(format!("WinINet не вернул прежние флаги: {restored}")); }
             // WinINet may update related registry fields when restoring flags. Only
             // accept unchanged values, exact originals, or its ProxyEnable form.
             for (i, c) in managed.iter().enumerate() {
@@ -534,18 +546,19 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     fs::remove_file(path).map_err(|e| format!("Настройки восстановлены, но snapshot не удалён: {e}"))
 }
 fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog: &mut Child) -> Result<(), String> {
+    let dump = || NAMES.iter().map(|name| format!("{name}={:?}", windows::get(name).unwrap_or(None))).collect::<Vec<_>>().join(" ");
     // Detect changes since capture, including the bypass list, before making writes.
     for c in &snapshot.changes {
         if !same_indicator(&c.name, &windows::get(&c.name)?, &c.before) { return Err(format!("{} изменился во время запуска; proxy не включён", c.name)); }
     }
     let current_flags = windows::flags()?;
-    if current_flags != snapshot.before_flags { return Err(format!("Флаги WinINet изменились во время запуска: {current_flags} вместо {}", snapshot.before_flags)); }
+    if has_pac(current_flags) != has_pac(snapshot.before_flags) { return Err(format!("Появился PAC/автоопределение до записи: {current_flags}; {}", dump())); }
     let mut writes = 0;
     let mut completed: Vec<&str> = Vec::new();
     for c in snapshot.changes.iter().filter(|c| c.managed) {
         check_watchdog(watchdog)?;
         let current_flags = windows::flags()?;
-        if current_flags != snapshot.before_flags { return Err(format!("Флаги WinINet изменились во время запуска: {current_flags} вместо {}", snapshot.before_flags)); }
+        if has_pac(current_flags) != has_pac(snapshot.before_flags) { return Err(format!("Появился PAC/автоопределение перед записью {}: {current_flags}; {}", c.name, dump())); }
         // Check the whole set again before each step. This narrows, but cannot eliminate,
         // races with external programs because Windows Registry has no compare-and-swap.
         for check in &snapshot.changes {
@@ -557,15 +570,15 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
         if fail_after == Some(writes) { return Err("Тестовая ошибка записи proxy".into()); }
     }
     let current_flags = windows::flags()?;
-    if current_flags != snapshot.before_flags { return Err(format!("Флаги WinINet изменились во время запуска: {current_flags} вместо {}", snapshot.before_flags)); }
+    if has_pac(current_flags) != has_pac(snapshot.before_flags) { return Err(format!("Появился PAC/автоопределение после значений: {current_flags}; {}", dump())); }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
         if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился до включения WinINet", c.name)); }
     }
     check_watchdog(watchdog)?;
     windows::set_flags(snapshot.applied_flags)?;
-    let applied = wait_flags(snapshot.applied_flags, Duration::from_secs(2));
-    if applied != snapshot.applied_flags { return Err(format!("WinINet не включил локальный proxy: флаги {applied}")); }
+    let applied = wait_local_proxy(Duration::from_secs(2));
+    if applied & 2 == 0 || has_pac(applied) { return Err(format!("WinINet не включил локальный proxy: флаги {applied}")); }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
         if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился при включении WinINet", c.name)); }
