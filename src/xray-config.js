@@ -165,7 +165,17 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
   let needsDirect = false, needsBlock = false;
   if (profileRules?.length) {
     for (const rule of profileRules) {
-      const entry = { type: 'field', outboundTag: rule.target === 'proxy' ? 'proxy' : rule.target, ...(rule.domains?.length ? { domain: rule.domains } : {}), ...(rule.ips?.length ? { ip: rule.ips } : {}), ...(rule.ports ? { port: rule.ports } : {}), ...(rule.domainStrategy ? { domainStrategy: rule.domainStrategy } : {}) };
+      const entry = {
+        type: 'field',
+        outboundTag: rule.target === 'proxy' ? 'proxy' : rule.target,
+        ...(rule.domains?.length ? { domain: rule.domains } : {}),
+        ...(rule.ips?.length ? { ip: rule.ips } : {}),
+        ...(rule.sources?.length ? { source: rule.sources } : {}),
+        ...(rule.ports ? { port: rule.ports } : {}),
+        ...(rule.network ? { network: rule.network } : {}),
+        ...(rule.domainStrategy ? { domainStrategy: rule.domainStrategy } : {}),
+        ...(rule.domainMatcher ? { domainMatcher: rule.domainMatcher } : {})
+      };
       if (rule.target === 'direct') needsDirect = true;
       if (rule.target === 'block') needsBlock = true;
       if (rule.target !== 'proxy') rules.push(entry);

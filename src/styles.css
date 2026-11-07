@@ -88,6 +88,8 @@ h2 { font-size: 25px; letter-spacing: -.035em; }
 .home-screen.connected .home-connect-button { background: #526a61; }
 .home-ip { margin-top: 17px; color: var(--muted); font-size: 13px; }
 .home-ip strong { margin-left: 5px; color: #ede0fb; }
+.route-source { display: inline-block; margin-top: 2px; color: var(--muted, #b9a9d6); }
+.route-source.warning-text { color: #f1d4af; }
 .inline-warning, .inline-note, .error-box, .active-server-note { width: min(100%, 500px); margin-top: 14px; padding: 12px 14px; border: 1px solid rgba(240, 189, 137, .25); border-radius: 10px; color: #f1d4af; background: rgba(120, 86, 45, .15); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .inline-note, .active-server-note { border-color: var(--line); color: var(--muted); background: rgba(141, 115, 167, .09); }
 .error-box { border-color: rgba(255, 169, 185, .35); color: #ffd1db; background: rgba(139, 53, 75, .2); }

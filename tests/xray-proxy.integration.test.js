@@ -90,18 +90,22 @@ test('реальные HTTP CONNECT и SOCKS5 проходят через выб
   }
 });
 
+// HY2_HOST lets the same test run over a real interface instead of loopback,
+// which exercises routing, MTU and the UDP path of the host stack.
 test('реальный локальный Hysteria2 + Salamander с pinSHA256 передаёт HTTP CONNECT', { skip: !process.env.XRAY_TEST_BIN, timeout: 20000 }, async () => {
+  const host = process.env.HY2_HOST || '127.0.0.1';
+  const bind = host === '127.0.0.1' ? '127.0.0.1' : '0.0.0.0';
   const dir = mkdtempSync(join(tmpdir(), 'kartovpn-hy2-')); let upstream, client, http;
   try {
     const cert = join(dir, 'cert.pem'), key = join(dir, 'key.pem');
-    const gen = spawnSync('openssl', ['req','-x509','-newkey','rsa:2048','-keyout',key,'-out',cert,'-days','1','-nodes','-subj','/CN=localhost','-addext','subjectAltName=DNS:localhost'], {stdio:'ignore'});
+    const gen = spawnSync('openssl', ['req','-x509','-newkey','rsa:2048','-keyout',key,'-out',cert,'-days','1','-nodes','-subj','/CN=localhost','-addext',`subjectAltName=DNS:localhost${host === '127.0.0.1' ? '' : `,IP:${host}`}`], {stdio:'ignore'});
     assert.equal(gen.status, 0, 'Тесту нужен openssl');
     const der = spawnSync('openssl', ['x509','-in',cert,'-outform','der']); assert.equal(der.status, 0);
     const pin = createHash('sha256').update(der.stdout).digest('hex');
     http = createHttpServer((_req,res) => res.end('integration-ok'));
     const targetPort = await listen(http), port = await udpPort();
-    const serverConfig = { log:{loglevel:'none'}, inbounds:[{ listen:'127.0.0.1', port, protocol:'hysteria', settings:{version:2,users:[{auth:'fixture-auth'}]}, streamSettings:{ network:'hysteria', security:'tls', tlsSettings:{certificates:[{certificateFile:cert,keyFile:key}]}, hysteriaSettings:{version:2}, finalmask:{udp:[{type:'salamander',settings:{password:'fixture-mask'}}]} } }], outbounds:[{protocol:'freedom',settings:{finalRules:[{action:'allow',network:'tcp',ip:['127.0.0.1/32'],port:String(targetPort)}]}}] };
-    const node = parseSubscriptionDetailed(`hy2://fixture-auth@127.0.0.1:${port}?sni=localhost&pinSHA256=${pin}&obfs=salamander&obfs-password=fixture-mask#local`).nodes[0];
+    const serverConfig = { log:{loglevel:'none'}, inbounds:[{ listen:bind, port, protocol:'hysteria', settings:{version:2,users:[{auth:'fixture-auth'}]}, streamSettings:{ network:'hysteria', security:'tls', tlsSettings:{certificates:[{certificateFile:cert,keyFile:key}]}, hysteriaSettings:{version:2}, finalmask:{udp:[{type:'salamander',settings:{password:'fixture-mask'}}]} } }], outbounds:[{protocol:'freedom',settings:{finalRules:[{action:'allow',network:'tcp',ip:[...new Set(['127.0.0.1/32', `${host}/32`])],port:String(targetPort)}]}}] };
+    const node = parseSubscriptionDetailed(`hy2://fixture-auth@${host}:${port}?sni=localhost&pinSHA256=${pin}&obfs=salamander&obfs-password=fixture-mask#local`).nodes[0];
     assert.ok(node); assert.ok(!node.unsupported);
     const config = buildXrayConfig([node], node.id, 'all'); config.log.loglevel = 'none';
     const serverPath = join(dir,'server.json'), clientPath = join(dir,'client.json');

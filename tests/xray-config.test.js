@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseSubscriptionDetailed, parseUserinfo, parseHappRouting } from '../src/subscription.js';
+import { parseSubscriptionDetailed, parseUserinfo, parseHappRouting, parseRoutingProfile } from '../src/subscription.js';
 import { buildXrayConfig } from '../src/xray-config.js';
 
 // All credentials and addresses below are fabricated test fixtures.
@@ -85,6 +85,41 @@ test('профиль маршрутизации читается из JSON по�
   const happ = 'happ://routing/onadd/' + Buffer.from(JSON.stringify(profile)).toString('base64');
   const parsed = parseHappRouting(happ);
   assert.deepEqual(parsed.rules.map(r => r.target), ['direct', 'block']);
+});
+test('Happ Plus: поддерживаемые правила применяются, остальные перечисляются по номеру', () => {
+  const payload = { routing: { rules: [
+    { type: 'field', domain: ['geosite:private', 'domain:example.test'], outboundTag: 'direct' },
+    { type: 'field', ip: ['10.0.0.0/8'], port: '443,8443', network: 'tcp', outboundTag: 'direct' },
+    { type: 'field', source: ['192.168.1.0/24'], outboundTag: 'block' },
+    { type: 'field', domain: ['geosite:ads'], outboundTag: 'block' },
+    { type: 'field', domain: ['ext:adblock.txt'], outboundTag: 'block' },
+    { type: 'field', domain: ['geosite:private'], outboundTag: 'direct-2' },
+    { type: 'field', domain: ['geosite:private'], outboundTag: 'direct', processName: ['chrome.exe'] },
+    { type: 'field', domain: ['geosite:private'], balancerTag: 'auto' },
+    { type: 'field', domain: ['geosite:private'], outboundTag: 'direct', port: 'http' },
+    { type: 'field', outboundTag: 'direct' }
+  ] }, dns: { servers: ['1.1.1.1'] } };
+  const parsed = parseRoutingProfile(payload);
+  assert.equal(parsed.total, 10);
+  assert.equal(parsed.rules.length, 4);
+  assert.deepEqual(parsed.rules.map(r => r.target), ['direct','direct','block','block']);
+  assert.deepEqual(parsed.rules[1].ports, '443,8443');
+  assert.equal(parsed.rules[1].network, 'tcp');
+  assert.deepEqual(parsed.rules[2].sources, ['192.168.1.0/24']);
+  assert.equal(parsed.unsupported.length, 6);
+  assert.deepEqual(parsed.unsupported.map(r => [r.index, r.reason]), [[5,'extDomain'],[6,'target'],[7,'fields'],[8,'fields'],[9,'port'],[10,'empty']]);
+  assert.deepEqual(parsed.unsupported[2].fields, ['processName']);
+  assert.equal(parsed.dnsApplied, false);
+});
+test('правила Happ с network и source попадают в конфиг Xray', () => {
+  const n = parseOne(vless);
+  const profile = { rules: [{ target: 'block', domains: [], ips: [], sources: ['192.168.1.0/24'], ports: '443', network: 'tcp' }] };
+  const c = buildXrayConfig([n], n.id, 'auto', profile);
+  const rule = c.routing.rules[0];
+  assert.equal(rule.network, 'tcp');
+  assert.deepEqual(rule.source, ['192.168.1.0/24']);
+  assert.equal(rule.port, '443');
+  assert.equal(rule.outboundTag, 'block');
 });
 test('Hysteria2 отображается как native hysteria + salamander', () => {
   const out = config(hy2).outbounds[0]; assert.equal(out.protocol, 'hysteria'); assert.equal(out.settings.version, 2);

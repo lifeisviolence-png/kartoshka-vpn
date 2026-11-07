@@ -102,19 +102,16 @@ function messageText(message) {
 function setMessage(key, params) { state.message = { key, params }; }
 function formatBytes(bytes) {
   if (bytes === null || bytes === undefined || !Number.isFinite(Number(bytes))) return '—';
-  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
-  const english = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const list = getLanguage() === 'en' ? english : units;
+  const list = ['unit.b', 'unit.kb', 'unit.mb', 'unit.gb', 'unit.tb'].map((key) => t(key));
   let value = Number(bytes); let index = 0;
   while (value >= 1024 && index < list.length - 1) { value /= 1024; index += 1; }
   return `${value.toFixed(value >= 10 || index === 0 ? 0 : 1)} ${list[index]}`;
 }
 function formatExpiry(date) {
-  if (!date) return getLanguage() === 'en' ? 'No expiry provided' : 'Срок не передан';
+  if (!date) return t('subscription.noExpiry');
   const value = new Date(date);
-  if (Number.isNaN(value.getTime())) return getLanguage() === 'en' ? 'No expiry provided' : 'Срок не передан';
-  const formatted = value.toLocaleDateString(locale(), { day: '2-digit', month: 'long', year: 'numeric' });
-  return getLanguage() === 'en' ? `until ${formatted}` : `до ${formatted}`;
+  if (Number.isNaN(value.getTime())) return t('subscription.noExpiry');
+  return t('subscription.until', { date: value.toLocaleDateString(locale(), { day: '2-digit', month: 'long', year: 'numeric' }) });
 }
 function formatDuration() {
   if (!state.connectedAt) return '—';
@@ -167,7 +164,7 @@ function countryName(node) {
   const code = node.countryCode || countryCodeFor(node.country);
   return code ? t(`country.${code}`) : (node.country || '');
 }
-function nodePlace(node) { return [countryName(node), node?.city].filter(Boolean).join(' · ') || (getLanguage() === 'en' ? 'Location not provided' : 'Местоположение не указано'); }
+function nodePlace(node) { return [countryName(node), node?.city].filter(Boolean).join(' · ') || t('servers.locationUnknown'); }
 function visibleNodes() {
   const query = state.search.trim().toLowerCase();
   return query ? state.servers.filter((node) => `${node.name || ''} ${node.country || ''} ${countryName(node)} ${node.city || ''} ${node.protocol || ''}`.toLowerCase().includes(query)) : state.servers;
@@ -256,7 +253,7 @@ function serverCard(node) {
   const reason = unsupportedReason(node);
   const active = state.connection === 'connected' && sameConfig(state.activeNode, node);
   const meta = [node.protocol || t('servers.configuration'), nodePlace(node), node.source === 'subscription-retained' ? t('servers.retained') : '', active ? t('servers.active') : ''].filter(Boolean).join(' · ');
-  return `<button class="server-card ${node.id === state.selectedId ? 'selected' : ''}" data-server="${escapeHtml(node.id)}" data-focus-key="server-${escapeHtml(node.id)}" ${busy() ? 'disabled' : ''} aria-pressed="${node.id === state.selectedId}"><span class="server-flag">${escapeHtml(node.flag || '◇')}</span><span class="server-card-copy"><strong>${escapeHtml(node.customName || node.name || t('servers.serverFallback'))}${node.favorite ? ` <span class="favorite-mark" aria-label="${escapeHtml(t('servers.favorite'))}">★</span>` : ''}</strong><small>${escapeHtml(meta)}</small>${reason ? `<small class="unsupported-text">${escapeHtml(reason)}</small>` : ''}</span><span class="server-card-ping ${tcpTestApplicable(node) && node.availability === 'offline' ? 'bad' : ''}">${!tcpTestApplicable(node) ? '—' : node.availability === 'testing' ? '…' : node.ping == null ? '—' : `${escapeHtml(node.ping)} ${getLanguage() === 'en' ? 'ms' : 'мс'}`}<small>${tcpTestApplicable(node) ? 'TCP' : 'UDP'}</small></span><span class="server-chevron" aria-hidden="true">›</span></button>`;
+  return `<button class="server-card ${node.id === state.selectedId ? 'selected' : ''}" data-server="${escapeHtml(node.id)}" data-focus-key="server-${escapeHtml(node.id)}" ${busy() ? 'disabled' : ''} aria-pressed="${node.id === state.selectedId}"><span class="server-flag">${escapeHtml(node.flag || '◇')}</span><span class="server-card-copy"><strong>${escapeHtml(node.customName || node.name || t('servers.serverFallback'))}${node.favorite ? ` <span class="favorite-mark" aria-label="${escapeHtml(t('servers.favorite'))}">★</span>` : ''}</strong><small>${escapeHtml(meta)}</small>${reason ? `<small class="unsupported-text">${escapeHtml(reason)}</small>` : ''}</span><span class="server-card-ping ${tcpTestApplicable(node) && node.availability === 'offline' ? 'bad' : ''}">${!tcpTestApplicable(node) ? '—' : node.availability === 'testing' ? '…' : node.ping == null ? '—' : `${escapeHtml(node.ping)} ${t('unit.ms')}`}<small>${tcpTestApplicable(node) ? 'TCP' : 'UDP'}</small></span><span class="server-chevron" aria-hidden="true">›</span></button>`;
 }
 function serversMarkup(node) {
   const meta = state.subscriptionMeta;
@@ -265,7 +262,7 @@ function serversMarkup(node) {
   const [status, , statusClass] = statusInfo();
   const reason = unsupportedReason(node);
   const activeDiffers = state.connection === 'connected' && !sameConfig(state.activeNode, node);
-  const pingLabel = (value) => value == null ? '—' : `${escapeHtml(value)} ${getLanguage() === 'en' ? 'ms' : 'мс'}`;
+  const pingLabel = (value) => value == null ? '—' : `${escapeHtml(value)} ${t('unit.ms')}`;
   return `<div class="workspace"><section class="server-column">
     <div class="section-heading"><div><span class="overline">${escapeHtml(t('servers.overline'))}</span><h2>${escapeHtml(t('servers.title'))}</h2></div><button class="primary-button" data-action="add">＋ ${escapeHtml(t('servers.add'))}</button></div>
     <div class="server-toolbar"><label class="search-box"><span aria-hidden="true">⌕</span><input id="server-search" data-focus-key="server-search" value="${escapeHtml(state.search)}" placeholder="${escapeHtml(t('servers.search'))}" aria-label="${escapeHtml(t('servers.search'))}"/></label><button class="toolbar-button" data-action="refresh" aria-label="${escapeHtml(t('app.refresh'))}" title="${escapeHtml(t('app.refresh'))}" ${state.importing ? 'disabled' : ''}>↻</button></div>
@@ -285,10 +282,12 @@ function serversMarkup(node) {
 function utilityMarkup() {
   if (state.activeNav === 'settings') {
     const source = state.subscriptionMeta?.routing ? t('settings.routeSourceSubscription') : t('settings.routeSourceBuiltin');
+    const rejected = state.subscriptionMeta?.routingUnsupported?.length || 0;
+    const routeNote = `${escapeHtml(t('settings.routeSource', { source }))}${rejected ? `<br/><span class="route-source warning-text">${escapeHtml(t('settings.routeUnsupported', { count: rejected }))}</span>` : ''}${state.subscriptionMeta?.routingDns ? `<br/><span class="route-source">${escapeHtml(t('settings.routeDnsIgnored'))}</span>` : ''}`;
     const unavailable = `<span>${escapeHtml(t('settings.unavailable'))}</span>`;
     return `<section class="utility-screen"><div class="utility-card"><span class="overline">${escapeHtml(t('settings.overline'))}</span><h2>${escapeHtml(t('settings.title'))}</h2><p class="utility-intro">${escapeHtml(t('settings.intro'))}</p>
       <div class="setting-row"><div><strong>${escapeHtml(t('settings.language'))}</strong><small>${escapeHtml(t('settings.languageHint'))}</small></div><select id="language" aria-label="${escapeHtml(t('settings.language'))}"><option value="ru" ${state.language === 'ru' ? 'selected' : ''}>${escapeHtml(t('settings.languageRu'))}</option><option value="en" ${state.language === 'en' ? 'selected' : ''}>${escapeHtml(t('settings.languageEn'))}</option></select></div>
-      <div class="setting-row"><div><strong>${escapeHtml(t('settings.routeMode'))}</strong><small>${escapeHtml(routeDescription(state.routeMode))}${escapeHtml(state.connection === 'connected' ? t('settings.routeHintConnected') : '')}<br/><span class="route-source">${escapeHtml(t('settings.routeSource', { source }))}</span></small></div><select id="route-mode" aria-label="${escapeHtml(t('settings.routeMode'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${routeModeIds.map((id) => `<option value="${id}" ${id === state.routeMode ? 'selected' : ''}>${escapeHtml(routeTitle(id))}</option>`).join('')}</select></div>
+      <div class="setting-row"><div><strong>${escapeHtml(t('settings.routeMode'))}</strong><small>${escapeHtml(routeDescription(state.routeMode))}${escapeHtml(state.connection === 'connected' ? t('settings.routeHintConnected') : '')}<br/>${routeNote}</small></div><select id="route-mode" aria-label="${escapeHtml(t('settings.routeMode'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${routeModeIds.map((id) => `<option value="${id}" ${id === state.routeMode ? 'selected' : ''}>${escapeHtml(routeTitle(id))}</option>`).join('')}</select></div>
       <div class="setting-row unavailable"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div>${unavailable}</div>
       <div class="setting-row unavailable"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div>${unavailable}</div>
       <div class="setting-row unavailable"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t('settings.dnsHint'))}</small></div>${unavailable}</div></div></section>`;
@@ -421,6 +420,11 @@ async function prepareImport(value) {
   const warnings = Array.isArray(parsed.warnings) ? parsed.warnings : [];
   const happRouting = parsed.format === 'happ-routing' ? parsed.routing : null;
   const routing = happRouting || parsed.routing || null;
+  // Rules this build cannot express are listed by number, not dropped silently.
+  for (const rule of routing?.unsupported || []) {
+    warnings.push({ key: `sub.routing.${rule.reason || 'shape'}`, params: { index: rule.index, fields: (rule.fields || []).join(', '), target: rule.target || '' } });
+  }
+  if (routing?.dns && routing.dnsApplied === false) warnings.push({ key: 'sub.routingDnsIgnored' });
   if (!parsed.nodes?.length) {
     if (routingOnly && routing) {
       return { nodes: [], errors: [], warnings: [], total: 0, isSubscription: true, routingOnly: true, routing, url: text, meta: state.subscriptionMeta, manualRouting: true };
@@ -478,7 +482,14 @@ function applyImport(plan) {
   const servers = [...remaining, ...imported];
   const selectedId = servers.some((node) => node.id === state.selectedId) ? state.selectedId : servers[0]?.id || null;
   const routing = plan.routing || (isSubscription ? null : state.subscriptionMeta?.routing || null);
-  const meta = isSubscription ? { ...(plan.meta || {}), routing: routing || null, routingSource: routing ? (plan.format === 'happ-routing' ? 'happ' : 'subscription') : null, routingUpdatedAt: routing ? new Date().toISOString() : null } : state.subscriptionMeta;
+  const meta = isSubscription ? {
+    ...(plan.meta || {}),
+    routing: routing || null,
+    routingUnsupported: routing?.unsupported || [],
+    routingDns: Boolean(routing?.dns),
+    routingSource: routing ? (plan.format === 'happ-routing' ? 'happ' : 'subscription') : null,
+    routingUpdatedAt: routing ? new Date().toISOString() : null
+  } : state.subscriptionMeta;
   const patch = { servers, selectedId, ...(isSubscription ? { subscriptionUrl: plan.url, subscriptionMeta: meta } : {}) };
   if (!commitData(patch)) throw Object.assign(new Error('saveFailed'), { code: 'saveFailed' });
   return { count: imported.length, duplicates, unsupported: imported.filter((node) => node.unsupported).length, retained: retained.length, skipped: plan.errors.length };

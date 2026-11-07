@@ -231,26 +231,50 @@ function splitLinks(text) {
   return out;
 }
 
-// Xray JSON profiles (Happ, Hiddify, sing-box exports converted by providers)
-// can carry both servers and routing rules. Only the parts this client can
-// honour are taken; everything else is reported instead of silently dropped.
+// Xray JSON profiles (Happ Plus, Hiddify, panels) can carry both servers and
+// routing rules. Only rules this build can express are applied; every other
+// rule is reported by number and field, because silently dropping a rule sends
+// traffic through the wrong outbound.
+const ROUTE_TARGETS = { direct: 'direct', block: 'block', proxy: 'proxy' };
+const ROUTE_FIELDS = new Set(['type', 'outboundTag', 'outbound_tag', 'domain', 'ip', 'port', 'network', 'source', 'domainStrategy', 'domainMatcher', 'ruleTag']);
+function routeList(value) { return Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()) : []; }
+function validPortSpec(value) {
+  const text = value === undefined || value === null ? '' : String(value).trim();
+  return text === '' || /^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(text);
+}
 export function parseRoutingProfile(payload) {
   if (!payload || typeof payload !== 'object') return null;
   const rules = payload.routing?.rules;
   if (!Array.isArray(rules)) return null;
-  const clean = [];
-  for (const rule of rules) {
-    if (!rule || typeof rule !== 'object') continue;
-    const outbound = String(rule.outboundTag || rule.outbound_tag || '');
-    const target = outbound === 'direct' || outbound === 'block' || outbound === 'proxy' ? outbound : null;
-    if (!target) continue;
-    const domains = Array.isArray(rule.domain) ? rule.domain.filter(item => typeof item === 'string' && item) : [];
-    const ips = Array.isArray(rule.ip) ? rule.ip.filter(item => typeof item === 'string' && item) : [];
-    const ports = rule.port === undefined ? undefined : String(rule.port);
-    if (!domains.length && !ips.length && !ports) continue;
-    clean.push({ target: target === 'proxy' ? 'proxy' : target, domains, ips, ...(ports ? { ports } : {}), ...(rule.domainStrategy ? { domainStrategy: String(rule.domainStrategy) } : {}) });
-  }
-  return clean.length ? { rules: clean, dns: payload.dns ?? null } : null;
+  const clean = [], unsupported = [];
+  rules.forEach((rule, index) => {
+    const number = index + 1;
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) { unsupported.push({ index: number, reason: 'shape' }); return; }
+    const unknown = Object.keys(rule).filter((key) => !ROUTE_FIELDS.has(key));
+    if (unknown.length) { unsupported.push({ index: number, reason: 'fields', fields: unknown }); return; }
+    if (rule.type !== undefined && String(rule.type) !== 'field') { unsupported.push({ index: number, reason: 'type', fields: [String(rule.type)] }); return; }
+    const rawTarget = String(rule.outboundTag || rule.outbound_tag || '');
+    const target = ROUTE_TARGETS[rawTarget];
+    if (!target) { unsupported.push({ index: number, reason: 'target', target: rawTarget }); return; }
+    const domains = routeList(rule.domain);
+    if (domains.some((item) => item.startsWith('ext:'))) { unsupported.push({ index: number, reason: 'extDomain' }); return; }
+    const ips = routeList(rule.ip), sources = routeList(rule.source);
+    const ports = rule.port === undefined || rule.port === null ? '' : String(rule.port);
+    if (!validPortSpec(ports)) { unsupported.push({ index: number, reason: 'port' }); return; }
+    const network = rule.network === undefined ? '' : String(rule.network).toLowerCase();
+    if (network && !['tcp', 'udp', 'tcp,udp'].includes(network)) { unsupported.push({ index: number, reason: 'network' }); return; }
+    if (!domains.length && !ips.length && !sources.length && !ports) { unsupported.push({ index: number, reason: 'empty' }); return; }
+    clean.push({
+      target, domains, ips,
+      ...(sources.length ? { sources } : {}),
+      ...(ports ? { ports } : {}),
+      ...(network ? { network } : {}),
+      ...(rule.domainStrategy ? { domainStrategy: String(rule.domainStrategy) } : {}),
+      ...(rule.domainMatcher ? { domainMatcher: String(rule.domainMatcher) } : {})
+    });
+  });
+  // `dns` from a profile is never applied: the tunnel has no DNS interception.
+  return { rules: clean, unsupported, dns: payload.dns ?? null, dnsApplied: false, total: rules.length, source: payload.source || null };
 }
 
 function fromJsonProfile(text) {

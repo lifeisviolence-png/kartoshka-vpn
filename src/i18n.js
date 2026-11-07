@@ -3,6 +3,14 @@
 // the user selected instead of the one the developer wrote.
 const strings = {
   ru: {
+    'unit.b': 'Б', 'unit.kb': 'КБ', 'unit.mb': 'МБ', 'unit.gb': 'ГБ', 'unit.tb': 'ТБ', 'unit.ms': 'мс',
+    'subscription.noExpiry': 'Срок не передан',
+    'subscription.until': 'до {date}',
+    'servers.locationUnknown': 'Местоположение не указано',
+    'bridge.previewProxy': 'Предпросмотр не может включить системный прокси',
+    'bridge.previewCertificate': 'Предпросмотр не может проверить сертификат сервера',
+    'bridge.previewProbe': 'Предпросмотр не может проверить системный VPN',
+    'bridge.subscriptionHttp': 'Сервер подписки вернул HTTP {status}',
     'app.name': 'KartoshkaVPN',
     'app.tagline': 'DESKTOP CLIENT',
     'app.windowsProxy': 'WINDOWS PROXY',
@@ -123,6 +131,8 @@ const strings = {
     'settings.routeMode': 'Режим маршрутизации',
     'settings.routeHintConnected': ' Чтобы изменить режим, сначала отключитесь.',
     'settings.routeSource': 'Правила: {source}',
+    'settings.routeUnsupported': 'Не поддержано правил: {count}',
+    'settings.routeDnsIgnored': 'DNS из подписки не применяется',
     'settings.routeSourceSubscription': 'из подписки',
     'settings.routeSourceBuiltin': 'встроенные',
     'settings.language': 'Язык интерфейса',
@@ -251,6 +261,15 @@ const strings = {
     'err.sub.clashYaml': 'Провайдер вернул формат Clash. Нужен формат base64 или список ссылок',
     'err.sub.badHappRouting': 'Некорректная ссылка маршрутизации Happ',
     'err.sub.nodeUnsupported': 'Узел не поддерживается',
+    'err.sub.routing.shape': 'Правило маршрутизации №{index}: некорректная структура',
+    'err.sub.routing.fields': 'Правило маршрутизации №{index} не поддерживается: поля {fields}',
+    'err.sub.routing.type': 'Правило маршрутизации №{index} не поддерживается: тип {fields}',
+    'err.sub.routing.target': 'Правило маршрутизации №{index} не поддерживается: outbound «{target}»',
+    'err.sub.routing.extDomain': 'Правило маршрутизации №{index} не поддерживается: внешний список доменов (ext:)',
+    'err.sub.routing.port': 'Правило маршрутизации №{index} не поддерживается: порт',
+    'err.sub.routing.network': 'Правило маршрутизации №{index} не поддерживается: network',
+    'err.sub.routing.empty': 'Правило маршрутизации №{index} пустое и пропущено',
+    'err.sub.routingDnsIgnored': 'DNS из подписки не применяется: приложение не перехватывает DNS-запросы',
     'err.config.error': 'Некорректная конфигурация',
     'err.config.badPort': 'Некорректный порт сервера',
     'err.config.badUuid': 'Некорректный UUID',
@@ -310,6 +329,14 @@ const strings = {
     'err.config.noSelection': 'Выбранный сервер не найден'
   },
   en: {
+    'unit.b': 'B', 'unit.kb': 'KB', 'unit.mb': 'MB', 'unit.gb': 'GB', 'unit.tb': 'TB', 'unit.ms': 'ms',
+    'subscription.noExpiry': 'No expiry provided',
+    'subscription.until': 'until {date}',
+    'servers.locationUnknown': 'Location not provided',
+    'bridge.previewProxy': 'Preview cannot enable the system proxy',
+    'bridge.previewCertificate': 'Preview cannot check the server certificate',
+    'bridge.previewProbe': 'Preview cannot probe the system VPN',
+    'bridge.subscriptionHttp': 'The subscription server returned HTTP {status}',
     'app.name': 'KartoshkaVPN',
     'app.tagline': 'DESKTOP CLIENT',
     'app.windowsProxy': 'WINDOWS PROXY',
@@ -430,6 +457,8 @@ const strings = {
     'settings.routeMode': 'Routing mode',
     'settings.routeHintConnected': ' Disconnect first to change the mode.',
     'settings.routeSource': 'Rules: {source}',
+    'settings.routeUnsupported': 'Unsupported rules: {count}',
+    'settings.routeDnsIgnored': 'DNS from the subscription is not applied',
     'settings.routeSourceSubscription': 'from the subscription',
     'settings.routeSourceBuiltin': 'built-in',
     'settings.language': 'Interface language',
@@ -558,6 +587,15 @@ const strings = {
     'err.sub.clashYaml': 'The provider returned Clash format. Base64 or a link list is required',
     'err.sub.badHappRouting': 'Invalid Happ routing link',
     'err.sub.nodeUnsupported': 'This node is not supported',
+    'err.sub.routing.shape': 'Routing rule {index} has an invalid shape',
+    'err.sub.routing.fields': 'Routing rule {index} is not supported: fields {fields}',
+    'err.sub.routing.type': 'Routing rule {index} is not supported: type {fields}',
+    'err.sub.routing.target': 'Routing rule {index} is not supported: outbound «{target}»',
+    'err.sub.routing.extDomain': 'Routing rule {index} is not supported: external domain list (ext:)',
+    'err.sub.routing.port': 'Routing rule {index} is not supported: port',
+    'err.sub.routing.network': 'Routing rule {index} is not supported: network',
+    'err.sub.routing.empty': 'Routing rule {index} is empty and was skipped',
+    'err.sub.routingDnsIgnored': 'DNS from the subscription is not applied: the app does not intercept DNS queries',
     'err.config.error': 'Invalid configuration',
     'err.config.badPort': 'Invalid server port',
     'err.config.badUuid': 'Invalid UUID',
@@ -626,6 +664,7 @@ export function countryCodeFor(label) {
   const value = String(label).trim().toLowerCase();
   return countryCodes.find((code) => strings.ru[`country.${code}`]?.toLowerCase() === value || strings.en[`country.${code}`]?.toLowerCase() === value) || '';
 }
+export function dictionaryFor(lang) { return strings[lang === 'en' ? 'en' : 'ru']; }
 let language = 'ru';
 export function supportedLanguages() { return ['ru', 'en']; }
 export function setLanguage(next) { language = next === 'en' ? 'en' : 'ru'; return language; }
