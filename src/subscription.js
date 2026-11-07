@@ -273,8 +273,12 @@ export function parseRoutingProfile(payload) {
       ...(rule.domainMatcher ? { domainMatcher: String(rule.domainMatcher) } : {})
     });
   });
+  // A global domainStrategy changes how *other* rules resolve domains; without
+  // the full profile semantics it is safer to ignore it and say so.
+  const globalStrategy = payload.routing?.domainStrategy ? String(payload.routing.domainStrategy) : '';
+  if (globalStrategy) unsupported.push({ index: 0, reason: 'globalStrategy', target: globalStrategy });
   // `dns` from a profile is never applied: the tunnel has no DNS interception.
-  return { rules: clean, unsupported, dns: payload.dns ?? null, dnsApplied: false, total: rules.length, source: payload.source || null };
+  return { rules: clean, unsupported, dns: payload.dns ?? null, dnsApplied: false, total: rules.length, source: payload.source || null, globalStrategy: globalStrategy || null };
 }
 
 function fromJsonProfile(text) {

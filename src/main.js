@@ -93,7 +93,13 @@ function commitData(patch) {
 }
 function selectedNode() { return state.servers.find((node) => node.id === state.selectedId) || null; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char])); }
-function errorText(error) { return localizedError(error); }
+function errorText(error) {
+  const text = localizedError(error);
+  // The Rust core still emits Russian diagnostics; the English UI marks them
+  // instead of pretending they were translated.
+  if (getLanguage() === 'en' && /[\u0400-\u04FF]/.test(text)) return t('err.coreRussian', { text });
+  return text;
+}
 function messageText(message) {
   if (!message) return '';
   if (message.key === 'raw') return message.params?.text || '';

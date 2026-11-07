@@ -110,6 +110,9 @@ test('Happ Plus: поддерживаемые правила применяют�
   assert.deepEqual(parsed.unsupported.map(r => [r.index, r.reason]), [[5,'extDomain'],[6,'target'],[7,'fields'],[8,'fields'],[9,'port'],[10,'empty']]);
   assert.deepEqual(parsed.unsupported[2].fields, ['processName']);
   assert.equal(parsed.dnsApplied, false);
+  const withStrategy = parseRoutingProfile({ routing: { domainStrategy: 'IPIfNonMatch', rules: [{ domain: ['domain:a.test'], outboundTag: 'direct' }] } });
+  assert.equal(withStrategy.globalStrategy, 'IPIfNonMatch');
+  assert.deepEqual(withStrategy.unsupported.map(r => r.reason), ['globalStrategy']);
 });
 test('правила Happ с network и source попадают в конфиг Xray', () => {
   const n = parseOne(vless);

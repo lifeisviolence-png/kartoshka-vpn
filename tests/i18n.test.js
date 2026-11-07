@@ -60,7 +60,7 @@ test('у каждой ошибки парсера и конфига есть п�
 });
 
 test('динамические ключи маршрутизации Happ существуют во всех вариантах', () => {
-  for (const reason of ['shape', 'fields', 'type', 'target', 'extDomain', 'port', 'network', 'empty']) {
+  for (const reason of ['shape', 'fields', 'type', 'target', 'extDomain', 'port', 'network', 'empty', 'globalStrategy']) {
     assert.ok(`err.sub.routing.${reason}` in ru, `ru: routing.${reason}`);
     assert.ok(`err.sub.routing.${reason}` in en, `en: routing.${reason}`);
   }
