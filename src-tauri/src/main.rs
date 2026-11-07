@@ -107,7 +107,12 @@ mod windows {
     #[link(name = "user32")]
     extern "system" { fn MessageBoxW(window: Handle, text: *const u16, caption: *const u16, flags: u32) -> i32; }
     fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
-    pub fn show_error(message: &str) { unsafe { MessageBoxW(0, wide(message).as_ptr(), wide("КартошкаVPN: ошибка proxy").as_ptr(), 0x10); } }
+    pub fn show_error(message: &str) {
+        // A modal box would block an unattended test run; only an explicit env opt-in
+        // disables it, so a real user always sees the error.
+        if std::env::var_os("KARTOVPN_WATCHDOG_NO_MODAL").is_some() { eprintln!("{message}"); return; }
+        unsafe { MessageBoxW(0, wide(message).as_ptr(), wide("КартошкаVPN: ошибка proxy").as_ptr(), 0x10); }
+    }
     fn winerr(code: i32) -> String { io::Error::from_raw_os_error(code).to_string() }
     struct Key(Handle);
     impl Drop for Key { fn drop(&mut self) { unsafe { RegCloseKey(self.0); } } }
@@ -302,6 +307,9 @@ mod windows {
             else { Err("Snapshot отсутствует, но Windows всё ещё указывает на локальный proxy".into()) }
         });
         if let Err(ref e) = recovered {
+            if std::env::var_os("KARTOVPN_WATCHDOG_DIAG").is_some() {
+                let _ = std::fs::write(path.with_extension("error"), e);
+            }
             if unsafe { WaitForSingleObject(parent.0, 0) } != WAIT_TIMEOUT { show_error(&format!("Аварийное восстановление proxy не выполнено: {e}\nSnapshot сохранён, проверьте настройки Windows вручную.")); }
         }
         if recovered.is_ok() && result == WAIT_OBJECT && unsafe { WaitForSingleObject(core.0, 0) } == WAIT_TIMEOUT {
@@ -468,22 +476,25 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     if !path.exists() { return Err("Snapshot исчез; восстановление невозможно, проверьте proxy Windows вручную".into()); }
     let snapshot = load_snapshot(path)?;
     let flags = windows::flags()?;
-    if flags != snapshot.before_flags && flags != snapshot.applied_flags {
-        return Err("Флаги WinINet изменены другой программой; snapshot сохранён, настройки не перезаписаны".into());
+    // FLAGS is derived: a configured server adds the proxy bit even while
+    // ProxyEnable=0, so only the PAC/auto-detect bits change the meaning here.
+    if has_pac(flags) != has_pac(snapshot.before_flags) {
+        return Err(format!("В WinINet включён PAC или автоопределение (флаги {flags}); snapshot сохранён, настройки не перезаписаны"));
     }
+    let proxy_applied = flags & 2 != 0;
     let managed: Vec<&Change> = snapshot.changes.iter().filter(|c| c.managed).collect();
     let mut expected = Vec::new();
     for c in &managed {
         let current = windows::get(&c.name)?;
         let after_flag_restore = c.name == "ProxyEnable" && flags == snapshot.before_flags && snapshot.before_flags != snapshot.applied_flags && current == dword(u32::from(snapshot.before_flags & 2 != 0));
         if !same_indicator(&c.name, &current, &c.before) && !same_indicator(&c.name, &current, &c.applied) && !after_flag_restore {
-            return Err(format!("{} изменён другой программой; snapshot сохранён, настройки не перезаписаны", c.name));
+            return Err(format!("{} изменён другой программой; snapshot сохранён, настройки не перезаписаны (сейчас {:?}, было {:?}, включали {:?}, флаги {flags})", c.name, current, c.before, c.applied));
         }
         expected.push(current);
     }
     // An original server value is not proof of ownership when a third-party VPN
     // turns on the same server. Never disable its active flags in that state.
-    if flags == snapshot.applied_flags {
+    if proxy_applied {
         let server = managed.iter().position(|c| c.name == "ProxyServer").ok_or("В snapshot отсутствует ProxyServer")?;
         if expected[server] != managed[server].applied || managed[server].before == managed[server].applied {
             return Err("Неоднозначный активный proxy: ProxyServer не подтверждает владение КартошкаVPN. Настройки не изменены, snapshot сохранён".into());
@@ -498,7 +509,7 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     };
     let recovery = (|| -> Result<(), String> {
         verify(&expected, flags)?;
-        if flags == snapshot.applied_flags && flags != snapshot.before_flags {
+        if proxy_applied && snapshot.before_flags & 2 == 0 {
             windows::set_flags(snapshot.before_flags)?;
             let restored = wait_no_pac(Duration::from_secs(2));
             if has_pac(restored) != has_pac(snapshot.before_flags) { return Err(format!("WinINet не вернул прежние флаги: {restored}")); }

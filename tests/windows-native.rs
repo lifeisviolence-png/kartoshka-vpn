@@ -373,12 +373,13 @@ fn wait_restore(path: &Path, context: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while path.exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(30)); }
     if path.exists() {
-        panic!("{context}: watchdog did not restore and remove snapshot; snapshot={:?}", fs::read(path).ok().map(|b| b.len()));
+        let error = fs::read_to_string(path.with_extension("error")).unwrap_or_default();
+        panic!("{context}: watchdog did not restore and remove snapshot; size={:?}; watchdog error: {error}", fs::read(path).ok().map(|b| b.len()));
     }
 }
 fn mock_command(name: &str, dir: &Path) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", name, "--nocapture"]).env("KARTOVPN_MOCK_DIR", dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command.args(["--exact", name, "--nocapture"]).env("KARTOVPN_MOCK_DIR", dir).env("KARTOVPN_WATCHDOG_DIAG", "1").env("KARTOVPN_WATCHDOG_NO_MODAL", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     command
 }
 
