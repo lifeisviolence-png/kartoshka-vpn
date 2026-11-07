@@ -18,6 +18,9 @@ impl Drop for RegistryGuard {
 fn saved() -> Vec<Option<RawValue>> { NAMES.into_iter().map(|name| windows::get(name).unwrap()).collect() }
 // FLAGS_UI is derived: a configured-but-disabled ProxyServer can add the proxy
 // bit. Only PAC/auto-detect change the safety meaning of the state.
+fn assert_same_indicator(name: &str, actual: &Option<RawValue>, expected: &Option<RawValue>) {
+    assert!(same_indicator(name, actual, expected), "{name}: {actual:?} != {expected:?}");
+}
 fn assert_no_pac(flags: u32, context: &str) {
     assert_eq!(flags & (4 | 8), 0, "{context}: PAC/autodetect bits present: {flags}");
 }
@@ -58,8 +61,10 @@ fn baseline(case: usize) {
     assert_eq!(windows::get("ProxyServer").unwrap(), server);
     assert_eq!(windows::get("ProxyOverride").unwrap(), override_value);
     assert_eq!(windows::get("AutoConfigURL").unwrap(), None, "PAC must be absent; {}", registry_dump());
-    assert_eq!(windows::get("AutoDetect").unwrap(), if case == 0 { dword(0) } else { None });
-    assert_eq!(windows::get("ProxyEnable").unwrap(), if case == 0 { dword(0) } else { None });
+    // Windows recreates a zero DWORD instead of keeping the value absent, so both
+    // cases describe the same inactive indicator; exact bytes are asserted after restore.
+    assert_same_indicator("AutoDetect", &windows::get("AutoDetect").unwrap(), &dword(0));
+    assert_same_indicator("ProxyEnable", &windows::get("ProxyEnable").unwrap(), &dword(0));
     require_direct(&capture_proxy().unwrap()).expect("baseline must pass the production direct check");
 }
 fn empty_runtime() -> ProxyRuntime { ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 } }
@@ -364,10 +369,12 @@ fn wait_child_exit(child: &mut Child, timeout: Duration, what: &str) {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
-fn wait_restore(path: &Path) {
+fn wait_restore(path: &Path, context: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while path.exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(30)); }
-    assert!(!path.exists(), "watchdog did not restore and remove snapshot");
+    if path.exists() {
+        panic!("{context}: watchdog did not restore and remove snapshot; snapshot={:?}", fs::read(path).ok().map(|b| b.len()));
+    }
 }
 fn mock_command(name: &str, dir: &Path) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
@@ -613,7 +620,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
                 assert!(host.try_wait().unwrap().is_none(), "monitor must survive later core death");
             }
             windows::set("ProxyServer", &text(LOCAL_PROXY)).unwrap();
-            wait_restore(&path);
+            wait_restore(&path, case);
             wait_child_exit(&mut host, Duration::from_secs(30), "mock host");
             assert!(core_handle.wait(5000) && watchdog_handle.wait(5000));
         } else if case == "listener" {
@@ -624,7 +631,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
             wait_file(&dir.join("result"), Duration::from_secs(20));
             assert_eq!(fs::read_to_string(dir.join("result")).unwrap(), "restored");
             assert!(fs::read_to_string(dir.join("health")).unwrap().contains("2080"));
-            wait_restore(&path);
+            wait_restore(&path, case);
             wait_child_exit(&mut host, Duration::from_secs(30), "mock host");
             assert!(core_handle.wait(5000) && watchdog_handle.wait(5000));
             drop(replacement);
@@ -635,7 +642,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
                 "watchdog" => kill_pid(ids[2] as u32),
                 _ => unreachable!(),
             }
-            wait_restore(&path);
+            wait_restore(&path, case);
             if case != "host" && case != "partial" && case != "after-restore" { wait_file(&dir.join("result"), Duration::from_secs(20)); assert_eq!(fs::read_to_string(dir.join("result")).unwrap(), "restored"); wait_child_exit(&mut host, Duration::from_secs(30), "mock host"); }
             assert!(watchdog_handle.wait(10_000), "watchdog must terminate");
             assert!(core_handle.wait(10_000), "mock core must terminate after successful recovery");
