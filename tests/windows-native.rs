@@ -358,7 +358,9 @@ impl std::ops::Deref for ChildGuard { type Target = Child; fn deref(&self) -> &C
 impl std::ops::DerefMut for ChildGuard { fn deref_mut(&mut self) -> &mut Child { &mut self.0 } }
 impl Drop for ChildGuard { fn drop(&mut self) { let _ = stop_child(&mut self.0); } }
 fn kill_pid(pid: u32) {
-    let result = Command::new("taskkill.exe").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+    // Deliberately no /T: a tree kill would also kill the watchdog that must
+    // survive this exact crash and restore the proxy.
+    let result = Command::new("taskkill.exe").args(["/PID", &pid.to_string(), "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
     assert!(result.success(), "taskkill failed for PID {pid}");
 }
 fn wait_child_exit(child: &mut Child, timeout: Duration, what: &str) {
