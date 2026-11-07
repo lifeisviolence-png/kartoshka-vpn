@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "КартошкаVPN",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "identifier": "ru.kartoshka.vpn",
   "build": {
     "beforeDevCommand": "pnpm run dev",
@@ -27,7 +27,8 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "externalBin": ["binaries/sing-box"],
+    "externalBin": ["binaries/xray"],
+    "resources": { "binaries/xray-assets/": "xray-assets/", "binaries/licenses/": "licenses/" },
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
   }
 }

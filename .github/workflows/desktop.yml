@@ -1,28 +1,24 @@
 name: Desktop builds
 
 on:
+  pull_request:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
-  SING_BOX_VERSION: 1.14.4
+  XRAY_VERSION: 26.10.31
+  XRAY_SHA256: 2e04a9995a6f2ad1b28c0bb25c708ecb2695e43a1c9c7889c4b6ac2b48cf7a6a
+  TARGET: x86_64-pc-windows-msvc
+  RULES_REV: b40845fed59ac2dd60c9c5f7b598dce2b5a2d46f
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: sing-box-1.14.4-windows-amd64.zip
-            binary: sing-box.exe
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,61 +36,113 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - name: Download sing-box
-        shell: bash
-        run: |
-          mkdir -p src-tauri/binaries
-          curl -L --fail --retry 3 -o /tmp/sing-box-package "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${{ matrix.archive }}"
-          if [[ "${{ matrix.archive }}" == *.zip ]]; then
-            7z e /tmp/sing-box-package -osrc-tauri/binaries -r "*/${{ matrix.binary }}"
-          else
-            tar -xzf /tmp/sing-box-package -C /tmp
-            cp "/tmp/sing-box-${SING_BOX_VERSION}/sing-box" src-tauri/binaries/sing-box
-          fi
-          mv "src-tauri/binaries/${{ matrix.binary }}" "src-tauri/binaries/sing-box-${{ matrix.target }}${{ matrix.binary == 'sing-box.exe' && '.exe' || '' }}"
-          chmod +x src-tauri/binaries/sing-box-${{ matrix.target }}${{ matrix.binary == 'sing-box.exe' && '.exe' || '' }} || true
-      - name: Generate desktop icons
-        run: pnpm tauri icon src-tauri/icons/potato-mark.svg
-      - name: Smoke test sing-box proxy on Windows
+          targets: x86_64-pc-windows-msvc
+      - name: Download and verify official Xray and licenses
         shell: pwsh
         run: |
-          $binary = "src-tauri/binaries/sing-box-${{ matrix.target }}.exe"
-          & $binary check -c tests/sing-box-proxy-smoke.json
-          $process = Start-Process -FilePath $binary -ArgumentList @("run", "-c", "tests/sing-box-proxy-smoke.json") -PassThru -WindowStyle Hidden
-          try {
-            $ready = $false
-            1..50 | ForEach-Object {
-              Start-Sleep -Milliseconds 100
-              if (Get-NetTCPConnection -LocalPort 2080 -State Listen -ErrorAction SilentlyContinue) { $ready = $true; break }
-            }
-            if (-not $ready) { throw "sing-box не поднял локальный proxy" }
-            $response = Invoke-WebRequest -UseBasicParsing -Proxy http://127.0.0.1:2080 -Uri https://www.gstatic.com/generate_204 -TimeoutSec 20
-            if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) { throw "HTTP smoke-test вернул $($response.StatusCode)" }
-          } finally {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'Xray-windows-64.zip'
+          Invoke-WebRequest -Uri "https://github.com/XTLS/Xray-core/releases/download/v$env:XRAY_VERSION/Xray-windows-64.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:XRAY_SHA256) { throw 'Xray archive SHA256 mismatch' }
+          $extract = Join-Path $env:RUNNER_TEMP 'xray-package'
+          Expand-Archive -Path $zip -DestinationPath $extract
+          New-Item -ItemType Directory -Force src-tauri/binaries/xray-assets,src-tauri/binaries/licenses | Out-Null
+          Copy-Item "$extract/xray.exe" "src-tauri/binaries/xray-$env:TARGET.exe"
+          Copy-Item "$extract/geoip.dat", "$extract/geosite.dat" src-tauri/binaries/xray-assets/
+          Copy-Item "$extract/LICENSE" src-tauri/binaries/licenses/Xray-MPL-2.0.txt
+          Copy-Item "$extract/README.md" src-tauri/binaries/licenses/Xray-README.md
+          # We do not ship wintun.dll or TUN support. These geo-data licenses are pinned
+          # to a source revision available by the Xray release date; final legal review is required.
+          $hashes = @{
+            'LICENSE' = '3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986'
+            'LICENSE-GeoSite' = '4d3730dbc49d4cde94cc9adb07e29dbf4afefac68705af830809b8b464425719'
+            'LICENSE-GeoSite-inherit' = 'b9d84a22870d3f21c91a4c6e410c9cc51d00902f5233ad0c84011479244bf7d2'
+            'README.md' = 'd2a6344e2a4e3a57cfdb2eed05fcc7419e92936b0f4b810766338040ad854f7c'
           }
+          foreach ($name in $hashes.Keys) {
+            $dst = "src-tauri/binaries/licenses/Xray-rules-$name.txt"
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/XTLS/Xray-rules-dat/$env:RULES_REV/$name" -OutFile $dst
+            if ((Get-FileHash $dst -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hashes[$name]) { throw "Geo-data license checksum mismatch: $name" }
+          }
+          if (-not (Select-String -Quiet -Path src-tauri/binaries/licenses/Xray-MPL-2.0.txt -Pattern 'Mozilla Public License Version 2.0')) { throw 'Missing Xray MPL-2.0 license' }
+          Write-Output "Xray archive SHA256 $env:XRAY_SHA256 verified; wintun.dll is not shipped"
+      - name: Generate desktop icons
+        run: pnpm tauri icon src-tauri/icons/potato-mark.svg
+      - name: Build frontend for Rust test harness
+        run: pnpm run build
+      - name: Build executable for watchdog process tests
+        run: cargo build --manifest-path src-tauri/Cargo.toml --target ${{ env.TARGET }}
+      - name: JavaScript config and real Xray integration tests
+        shell: pwsh
+        run: |
+          $env:XRAY_TEST_BIN = (Resolve-Path "src-tauri/binaries/xray-$env:TARGET.exe").Path
+          $env:XRAY_LOCATION_ASSET = (Resolve-Path 'src-tauri/binaries/xray-assets').Path
+          $gitRoot = Split-Path (Split-Path (Get-Command git.exe).Source)
+          foreach ($dir in @((Join-Path $gitRoot 'usr/bin'), (Join-Path $gitRoot 'mingw64/bin'))) {
+            if (Test-Path (Join-Path $dir 'openssl.exe')) { $env:PATH = "$dir;$env:PATH"; break }
+          }
+          if (-not (Get-Command openssl.exe -ErrorAction SilentlyContinue)) { throw 'OpenSSL is required for real Xray TLS tests' }
+          node --test tests/xray-config.test.js tests/xray-proxy.integration.test.js
+          if ($LASTEXITCODE -ne 0) { throw "JavaScript Xray tests failed ($LASTEXITCODE)" }
+      - name: Real Windows registry, watchdog crash and loopback Xray smoke
+        shell: pwsh
+        env:
+          RUST_BACKTRACE: 1
+          KARTOVPN_DISPOSABLE_WINDOWS_CI: '1'
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne "github-hosted") { throw "Registry tests require a disposable GitHub-hosted runner" }
+          $env:KARTOVPN_WATCHDOG_TEST_EXE = (Resolve-Path "src-tauri/target/$env:TARGET/debug/kartoshka-vpn.exe").Path
+          $env:XRAY_TEST_BINARY = (Resolve-Path "src-tauri/binaries/xray-$env:TARGET.exe").Path
+          $env:XRAY_TEST_ASSETS = (Resolve-Path 'src-tauri/binaries/xray-assets').Path
+          cargo test --manifest-path src-tauri/Cargo.toml --target $env:TARGET windows_native_tests:: -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath windows-smoke.log
+          if ($LASTEXITCODE -ne 0) { throw "Windows native smoke failed ($LASTEXITCODE)" }
+      - name: Upload Windows smoke log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-log
+          path: windows-smoke.log
+          if-no-files-found: warn
       - name: Build and validate Tauri app
         env:
           RUST_BACKTRACE: 1
-        run: pnpm tauri build --target ${{ matrix.target }}
+        run: pnpm tauri build --target ${{ env.TARGET }}
+      - name: Inspect installed bundle and load geodata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem "src-tauri/target/$env:TARGET/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer missing' }
+          $dest = Join-Path $env:RUNNER_TEMP 'kartoshka-installed'
+          $result = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$dest") -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "NSIS installation failed: $($result.ExitCode)" }
+          foreach ($file in @('xray.exe','xray-assets/geoip.dat','xray-assets/geosite.dat','licenses/Xray-MPL-2.0.txt','licenses/Xray-rules-LICENSE.txt','licenses/Xray-rules-LICENSE-GeoSite.txt','licenses/Xray-rules-LICENSE-GeoSite-inherit.txt')) {
+            if (-not (Test-Path (Join-Path $dest $file))) { throw "Installed file missing: $file" }
+          }
+          $env:XRAY_LOCATION_ASSET = Join-Path $dest 'xray-assets'
+          & (Join-Path $dest 'xray.exe') run -test -config (Resolve-Path tests/windows-geodata.json).Path
+          if ($LASTEXITCODE -ne 0) { throw 'Installed Xray could not load installed geodata' }
+          Write-Output 'PASS installed sidecar, geodata and licenses verified'
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kartoshka-vpn-${{ matrix.target }}
-          path: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/**
+          name: kartoshka-vpn-x86_64-pc-windows-msvc
+          path: src-tauri/target/${{ env.TARGET }}/release/bundle/**
 
   publish:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
-      - name: Publish release assets
+          pattern: kartoshka-vpn-*
+      - name: Publish prerelease assets
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           files: release-assets/**/*

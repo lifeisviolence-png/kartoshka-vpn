@@ -3,16 +3,6 @@
   "description": "Основные разрешения КартошкаVPN",
   "windows": ["main"],
   "permissions": [
-    "core:default",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "binaries/sing-box",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    }
+    "core:default"
   ]
 }

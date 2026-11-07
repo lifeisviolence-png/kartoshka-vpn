@@ -8,3 +8,4 @@ src-tauri/target/
 src-tauri/icons/*.png
 src-tauri/icons/*.ico
 src-tauri/icons/*.icns
+src-tauri/gen/
