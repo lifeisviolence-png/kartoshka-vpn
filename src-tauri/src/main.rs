@@ -250,13 +250,6 @@ mod windows {
         if unsafe { IsProcessInJob(GetCurrentProcess(), 0, &mut in_job) } == 0 { return Err(format!("Не удалось проверить Job Object приложения: {}", io::Error::last_os_error())); }
         Ok(0x08000000 | if in_job != 0 { 0x01000000 } else { 0 })
     }
-    pub fn independent_process(child: &Child) -> Result<bool, String> {
-        let mut in_job = 0;
-        if unsafe { IsProcessInJob(child.as_raw_handle() as Handle, 0, &mut in_job) } == 0 {
-            return Err(format!("Не удалось проверить изоляцию watchdog: {}", io::Error::last_os_error()));
-        }
-        Ok(in_job == 0)
-    }
     struct OwnedHandle(Handle);
     impl Drop for OwnedHandle { fn drop(&mut self) { unsafe { CloseHandle(self.0); } } }
     fn open_verified(pid: u32, creation: u64, terminate: bool) -> Result<OwnedHandle, String> {
@@ -344,7 +337,6 @@ mod windows {
     pub fn ensure_core_job() -> Result<(), String> { Err("Поддерживается только Windows".into()) }
     pub fn core_in_job(_: &std::process::Child) -> Result<bool, String> { Err("Поддерживается только Windows".into()) }
     pub fn watchdog_creation_flags() -> Result<u32, String> { Err("Поддерживается только Windows".into()) }
-    pub fn independent_process(_: &std::process::Child) -> Result<bool, String> { Err("Поддерживается только Windows".into()) }
     pub fn watchdog(_: &std::path::Path, _: (u32, u64), _: (u32, u64)) -> Result<(), String> { Err("Поддерживается только Windows".into()) }
     pub fn show_error(message: &str) { eprintln!("{message}"); }
     pub fn one_instance() -> Result<Instance, String> { Err("Поддерживается только Windows".into()) }
@@ -693,9 +685,13 @@ fn launch_watchdog(path: &Path, core: &Child) -> Result<Child, String> {
         let _ = stop_child(&mut watcher);
         return Err("Watchdog не подтвердил проверенные процессы до включения proxy".into());
     }
-    if !matches!(windows::independent_process(&watcher), Ok(true)) {
+    // The property that matters is escaping our own KILL_ON_JOB_CLOSE job: if the
+    // GUI dies, that job kills Xray and must not kill the watchdog. Membership in an
+    // outer launcher job (Task Scheduler, installer, corporate launcher) is allowed;
+    // such a job also outlives a GUI crash, and its own termination kills the GUI too.
+    if windows::core_in_job(&watcher).unwrap_or(true) {
         let _ = stop_child(&mut watcher);
-        return Err("Watchdog не изолирован от Windows Job Object; proxy не включён".into());
+        return Err("Watchdog остался в защитном Job Object приложения; proxy не включён".into());
     }
     Ok(watcher)
 }
