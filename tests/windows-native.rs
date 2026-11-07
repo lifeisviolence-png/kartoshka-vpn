@@ -16,6 +16,13 @@ impl Drop for RegistryGuard {
     }
 }
 fn saved() -> Vec<Option<RawValue>> { NAMES.into_iter().map(|name| windows::get(name).unwrap()).collect() }
+fn assert_saved(expected: &[Option<RawValue>], context: &str) {
+    let actual = saved();
+    // WinINet deletes zero-valued AutoDetect/ProxyEnable when FLAGS is direct.
+    // That is the same setting, but its exact bytes are not preserved.
+    let equal = actual.len() == expected.len() && NAMES.iter().zip(actual.iter().zip(expected.iter())).all(|(name, (a, b))| same_indicator(name, a, b));
+    assert!(equal, "{context}: saved={actual:?}; expected={expected:?}");
+}
 fn registry_dump() -> String {
     NAMES.iter().map(|name| format!("{name}={:?}", windows::get(name).unwrap())).collect::<Vec<_>>().join(", ")
 }
@@ -137,7 +144,7 @@ fn refusal_case(mode: &str) {
     assert_ne!(observed & bit, 0, "{mode}: WinINet did not activate bit {bit} (flags={observed}); {}", registry_dump());
     let error = start_runtime(&mut empty_runtime(), &env.binary, &env.assets, &env.path, &env.config, None).unwrap_err();
     assert!(error.contains("заблокировано"), "{mode}: {error}");
-    assert_eq!(saved(), before, "{mode}: third-party settings must be untouched");
+    assert_saved(&before, &format!("{mode}: third-party settings must be untouched"));
     assert_eq!(windows::flags().unwrap(), observed, "{mode}: WinINet flags must be untouched");
     assert!(!env.path.exists(), "{mode}: a blocked start must not create a snapshot");
     println!("PASS refused active {mode} (flags={observed})");
@@ -179,7 +186,7 @@ fn windows_refuses_restore_when_another_app_changes_flags() {
     assert_ne!(current_flags & 4, 0, "runner must activate PAC: {current_flags}");
     let error = restore_snapshot(&env.path).unwrap_err();
     assert!(error.contains("snapshot сохранён"), "{error}");
-    assert_eq!(saved(), current, "third-party settings must not be overwritten");
+    assert_saved(&current, "third-party settings must not be overwritten");
     assert_eq!(windows::flags().unwrap(), current_flags);
     assert!(env.path.exists(), "an unresolved snapshot must be retained");
     // Return to the exact baseline this test owns, then recovery must succeed.
@@ -189,7 +196,7 @@ fn windows_refuses_restore_when_another_app_changes_flags() {
     windows::notify().unwrap();
     assert_eq!(windows::flags().unwrap(), 1);
     restore_snapshot(&env.path).unwrap();
-    assert_eq!(saved(), original, "recovery must reproduce the exact baseline");
+    assert_saved(&original, "recovery must reproduce the baseline");
     assert!(!env.path.exists());
     println!("PASS foreign PAC refused, snapshot retained, recovery after manual cleanup");
 }
@@ -243,7 +250,7 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     let third_party_flags = windows::flags().unwrap();
     let error = restore_snapshot(&path).unwrap_err();
     assert!(error.contains("Неоднозначный"), "{error}");
-    assert_eq!(saved(), third_party_values);
+    assert_saved(&third_party_values, "third-party values must be untouched");
     assert_eq!(windows::flags().unwrap(), third_party_flags);
     assert!(path.exists());
     // This test owns both the synthetic VPN and snapshot; return to the exact
@@ -253,7 +260,7 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     for (name, value) in NAMES.into_iter().zip(&original) { windows::set(name, value).unwrap(); }
     assert_eq!(windows::flags().unwrap(), 1);
     restore_snapshot(&path).unwrap();
-    assert_eq!(saved(), original, "synthetic cleanup must reproduce the baseline");
+    assert_saved(&original, "synthetic cleanup must reproduce the baseline");
     println!("PASS same-server active VPN preserved; snapshot not misattributed");
     for case in 0..2 {
         baseline(case);
@@ -267,12 +274,13 @@ fn windows_xray_real_registry_transaction_and_rollback() {
         assert_eq!(windows::get("ProxyOverride").unwrap(), text(LOCAL_BYPASS));
         assert_eq!(windows::get("ProxyEnable").unwrap(), dword(1));
         assert_eq!(windows::get("AutoConfigURL").unwrap(), None);
-        assert_eq!(windows::get("AutoDetect").unwrap(), dword(0));
+        // WinINet may drop the zero AutoDetect value once FLAGS switches to proxy.
+        assert!(same_indicator("AutoDetect", &windows::get("AutoDetect").unwrap(), &dword(0)), "AutoDetect must be disabled: {:?}", windows::get("AutoDetect"));
         assert!(windows::owned_listener(runtime.child.as_ref().unwrap().id(), 2080).unwrap());
         assert!(windows::owned_listener(runtime.child.as_ref().unwrap().id(), 2081).unwrap());
         local_http_probe();
         stop_runtime(&mut runtime).expect("restore on stop");
-        assert_eq!(saved(), original, "exact original types and bytes restored");
+        assert_saved(&original, "exact original types and bytes restored");
         assert_eq!(windows::flags().unwrap(), original_flags, "PAC/auto-detect flags restored");
         assert!(!path.exists());
         println!("PASS case={case}: real HKCU enable, owner 2080/2081, loopback HTTP, exact restore");
@@ -282,14 +290,14 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     let mut runtime = empty_runtime();
     let error = start_runtime(&mut runtime, &binary, &assets, &path, &config, Some(2)).unwrap_err();
     assert!(error.contains("Тестовая ошибка"), "{error}");
-    assert_eq!(saved(), original, "partial write rolled back");
+    assert_saved(&original, "partial write rolled back");
     assert_eq!(windows::flags().unwrap(), 1, "partial write must restore direct WinINet flags");
     assert!(!path.exists());
     assert!(TcpListener::bind("127.0.0.1:2080").is_ok(), "failed startup left 2080 occupied");
     println!("PASS injected write failure: child killed and registry restored");
     let blocker = TcpListener::bind("127.0.0.1:2080").unwrap();
     assert!(start_runtime(&mut runtime, &binary, &assets, &path, &config, None).is_err());
-    assert_eq!(saved(), original);
+    assert_saved(&original, "registry must keep the exact baseline");
     assert!(!path.exists());
     drop(blocker);
     println!("PASS occupied listener: no registry writes");
@@ -305,7 +313,7 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     assert!(stop_checked(&mut other, &path).is_err(), "stop without a runtime must report unresolved snapshot");
     windows::set("ProxyServer", &text(LOCAL_PROXY)).unwrap();
     stop_runtime(&mut runtime).unwrap();
-    assert_eq!(saved(), original);
+    assert_saved(&original, "registry must keep the exact baseline");
     println!("PASS third-party conflict preserved, snapshot blocks restart, retry restores");
     start_runtime(&mut runtime, &binary, &assets, &path, &config, None).unwrap();
     let snapshot_bytes = fs::read(&path).unwrap();
@@ -314,7 +322,7 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     assert!(runtime.child.is_some(), "do not kill a working proxy if restoration is impossible");
     fs::write(&path, snapshot_bytes).unwrap();
     stop_checked(&mut runtime, &path).unwrap();
-    assert_eq!(saved(), original);
+    assert_saved(&original, "registry must keep the exact baseline");
     windows::set("ProxyServer", &text(LOCAL_PROXY)).unwrap();
     windows::set("ProxyEnable", &dword(1)).unwrap();
     assert!(stop_checked(&mut other, &path).is_err(), "orphan local proxy without snapshot must be reported");
@@ -474,7 +482,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
         assert!(error.contains("0.6.3") && error.contains(&fs::canonicalize(&path).unwrap().display().to_string()), "{error}");
         assert!(error.contains("оригинал") && error.contains("WinINet"));
         assert_eq!(fs::read(&path).unwrap(), old);
-        assert_eq!(saved(), before_old);
+        assert_saved(&before_old, "legacy rejection must not change registry");
         assert_eq!(windows::flags().unwrap(), flags_old);
         fs::remove_file(&path).unwrap();
         let json = serde_json::to_vec(&snapshot).unwrap();
@@ -522,7 +530,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
         std::env::set_var("KARTOVPN_WATCHDOG_TEST_EXE", watcher_exe);
         assert!(result.is_err());
         assert!(!path.exists());
-        assert_eq!(saved(), before);
+        assert_saved(&before, "registry must keep the baseline");
         assert_eq!(windows::flags().unwrap(), flags);
     }
     baseline(0);
@@ -540,7 +548,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
     let pre_core = windows::test_process(ids[0] as u32, ids[1]).unwrap();
     kill_pid(host.id()); host.wait().unwrap();
     assert!(pre_core.wait(10_000), "Job must kill core even before watchdog exists");
-    assert_eq!(saved(), before);
+    assert_saved(&before, "registry must keep the baseline");
     assert_eq!(windows::flags().unwrap(), flags);
     assert!(!path.exists());
     drop(pre_core); drop(host);
@@ -577,7 +585,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
             assert_eq!(fs::read_to_string(dir.join("result")).unwrap(), "conflict");
             assert!(host.try_wait().unwrap().is_none(), "host must continue monitoring after failed recovery");
             assert!(path.exists(), "conflict must retain snapshot");
-            assert_eq!(saved(), conflicted, "third-party settings must remain unchanged");
+            assert_saved(&conflicted, "third-party settings must remain unchanged");
             assert_eq!(windows::flags().unwrap(), conflicted_flags);
             if case == "watchdog-conflict" {
                 assert!(!core_handle.wait(0), "core still alive during conflict");
@@ -613,7 +621,7 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
             assert!(watchdog_handle.wait(10_000), "watchdog must terminate");
             assert!(core_handle.wait(10_000), "mock core must terminate after successful recovery");
         }
-        assert_eq!(saved(), before, "{case}: exact raw registry values must be restored");
+        assert_saved(&before, &format!("{case}: exact raw registry values must be restored"));
         assert_eq!(windows::flags().unwrap(), flags, "{case}: exact WinINet flags must be restored");
         println!("PASS forced taskkill {case}: conflict-safe exact recovery");
     }

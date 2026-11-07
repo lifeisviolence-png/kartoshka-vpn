@@ -455,7 +455,7 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     for c in &managed {
         let current = windows::get(&c.name)?;
         let after_flag_restore = c.name == "ProxyEnable" && flags == snapshot.before_flags && snapshot.before_flags != snapshot.applied_flags && current == dword(u32::from(snapshot.before_flags & 2 != 0));
-        if current != c.before && current != c.applied && !after_flag_restore {
+        if !same_indicator(&c.name, &current, &c.before) && !same_indicator(&c.name, &current, &c.applied) && !after_flag_restore {
             return Err(format!("{} изменён другой программой; snapshot сохранён, настройки не перезаписаны", c.name));
         }
         expected.push(current);
