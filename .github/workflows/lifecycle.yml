@@ -1,0 +1,112 @@
+name: Windows install lifecycle
+
+# Verifies install, upgrade and removal on several Windows images using the
+# installer produced by a specific "Desktop builds" run. These are Server SKUs,
+# not Windows 10/11 desktops: the report must say so.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Desktop builds run id that produced the installer
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  lifecycle:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2019, windows-2022, windows-2025]
+    steps:
+      - name: Show image version
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Output "OS: $($os.Caption) $($os.Version) build $($os.BuildNumber)"
+      - name: Download the previous release installer
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/lifeisviolence-png/kartoshka-vpn/releases/download/v0.7.0/VPN_0.7.0_x64-setup.exe'
+          Invoke-WebRequest -Uri $url -OutFile (Join-Path $env:RUNNER_TEMP 'vpn-0.7.0-setup.exe') -UseBasicParsing
+      - name: Download the build under test
+        uses: actions/download-artifact@v4
+        with:
+          name: kartoshka-vpn-x86_64-pc-windows-msvc
+          path: artifact
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install, upgrade and remove
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-AllEntries {
+            Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+              ForEach-Object { Get-ItemProperty $_.PSPath } |
+              Where-Object { $_.DisplayName -like '*Kartoshka*' -or $_.DisplayName -like '*артошка*' }
+          }
+          function Get-AppEntry([string] $dir) {
+            Get-AllEntries | Where-Object {
+              ($_.InstallLocation -and $_.InstallLocation.TrimEnd('\') -eq $dir.TrimEnd('\')) -or
+              ($_.DisplayIcon -and $_.DisplayIcon -like "$dir*")
+            } | Select-Object -First 1
+          }
+          function Wait-Gone([string] $path, [int] $seconds = 40) {
+            $deadline = (Get-Date).AddSeconds($seconds)
+            while ((Test-Path $path) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+            return -not (Test-Path $path)
+          }
+          function Run-Installer([string] $exe, [string] $dir) {
+            $process = Start-Process -FilePath $exe -ArgumentList @('/S', "/D=$dir") -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "installer $exe exited with $($process.ExitCode)" }
+          }
+          $old = Join-Path $env:RUNNER_TEMP 'vpn-0.7.0-setup.exe'
+          $new = (Get-ChildItem 'artifact' -Recurse -Filter '*-setup.exe' | Select-Object -First 1).FullName
+          if (-not $new) { throw 'build artifact without NSIS installer' }
+          $dest = Join-Path $env:RUNNER_TEMP 'vpn-lifecycle'
+
+          Write-Output '--- 1. install 0.7.0'
+          Run-Installer $old $dest
+          $exe = Join-Path $dest 'kartoshka-vpn.exe'
+          if (-not (Test-Path $exe)) { throw 'kartoshka-vpn.exe missing after 0.7.0 install' }
+          $entry = Get-AppEntry $dest
+          if (-not $entry) { Get-AllEntries | Format-List DisplayName, DisplayVersion, InstallLocation, DisplayIcon | Out-String | Write-Output; throw 'uninstall entry missing after 0.7.0 install' }
+          Write-Output "0.7.0 entry: $($entry.DisplayName) $($entry.DisplayVersion) at $($entry.InstallLocation)"
+          if ($entry.DisplayVersion -ne '0.7.0') { throw "unexpected version after 0.7.0 install: $($entry.DisplayVersion)" }
+
+          Write-Output '--- 2. upgrade to the built version'
+          Run-Installer $new $dest
+          $exe = Join-Path $dest 'kartoshka-vpn.exe'
+          $fileVersion = (Get-Item $exe).VersionInfo.ProductVersion
+          $entry = Get-AppEntry $dest
+          if (-not $entry) { throw 'uninstall entry missing after upgrade' }
+          Write-Output "upgraded entry: $($entry.DisplayName) $($entry.DisplayVersion); exe $fileVersion"
+          if ($entry.DisplayVersion -eq '0.7.0') { throw 'upgrade did not replace the registered version' }
+          foreach ($file in @('xray.exe', 'xray-assets/geoip.dat', 'xray-assets/geosite.dat')) {
+            if (-not (Test-Path (Join-Path $dest $file))) { throw "missing after upgrade: $file" }
+          }
+
+          Write-Output '--- 3. uninstall'
+          $uninstaller = Join-Path $dest 'uninstall.exe'
+          if (-not (Test-Path $uninstaller)) { throw 'uninstall.exe missing' }
+          $process = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+          Write-Output "uninstaller exit: $($process.ExitCode)"
+          if (-not (Wait-Gone $exe)) { throw 'kartoshka-vpn.exe still present after uninstall' }
+          Start-Sleep -Seconds 2
+          if (Get-AppEntry $dest) { throw 'uninstall entry still present after uninstall' }
+          Write-Output 'PASS uninstall removed files and the registry entry'
+
+          Write-Output '--- 4. clean install and removal of the build'
+          $fresh = Join-Path $env:RUNNER_TEMP 'vpn-fresh'
+          Run-Installer $new $fresh
+          if (-not (Test-Path (Join-Path $fresh 'kartoshka-vpn.exe'))) { throw 'clean install produced no exe' }
+          $entry = Get-AppEntry $fresh
+          if (-not $entry) { throw 'clean install produced no uninstall entry' }
+          Write-Output "fresh entry: $($entry.DisplayName) $($entry.DisplayVersion)"
+          $process = Start-Process -FilePath (Join-Path $fresh 'uninstall.exe') -ArgumentList '/S' -Wait -PassThru
+          if (-not (Wait-Gone (Join-Path $fresh 'kartoshka-vpn.exe'))) { throw 'clean uninstall left the exe behind' }
+          if (Get-AppEntry $fresh) { throw 'clean uninstall left the registry entry behind' }
+          Write-Output 'PASS clean install and removal'
