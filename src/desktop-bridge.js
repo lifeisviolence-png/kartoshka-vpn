@@ -1,12 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { t } from './i18n.js';
 
 const isDesktop = Boolean(window.__TAURI_INTERNALS__);
 const directScheme = /^(vless|vmess|trojan|ss|hysteria2):\/\//i;
 
 export const desktopBridge = {
   async connect({ config }) {
-    if (!isDesktop) return { ok: false, demo: true, error: 'Preview не может включить системный прокси' };
+    if (!isDesktop) return { ok: false, demo: true, error: t('bridge.previewProxy') };
     await invoke('start_proxy', { configJson: JSON.stringify(config) });
     return { ok: true, native: true };
   },
@@ -19,11 +20,11 @@ export const desktopBridge = {
     if (directScheme.test(url)) return { body: url, userinfo: null };
     if (isDesktop) return invoke('fetch_subscription', { url });
     const response = await fetch(url, { cache: 'no-store', headers: { Accept: 'text/plain, text/*, */*' } });
-    if (!response.ok) throw new Error(`Сервер подписки вернул HTTP ${response.status}`);
+    if (!response.ok) throw new Error(t('bridge.subscriptionHttp', { status: response.status }));
     return { body: await response.text(), userinfo: response.headers.get('subscription-userinfo') };
   },
   async pinCertificate({ host, port, serverName }) {
-    if (!isDesktop) throw new Error('Preview не может проверить сертификат сервера');
+    if (!isDesktop) throw new Error(t('bridge.previewCertificate'));
     return invoke('pin_peer_certificate', { host, port: Number(port), serverName: String(serverName || host) });
   },
   async pingNode(node) {
@@ -35,7 +36,7 @@ export const desktopBridge = {
     return invoke('test_proxy_latency');
   },
   async probeInternet() {
-    if (!isDesktop) throw new Error('Preview не может проверить системный VPN');
+    if (!isDesktop) throw new Error(t('bridge.previewProbe'));
     return invoke('probe_internet');
   },
   async readLogs() {

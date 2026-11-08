@@ -46,11 +46,17 @@ function streamFor(outbound) {
   const network = ({ tcp: 'raw', raw: 'raw', ws: 'ws', websocket: 'ws', grpc: 'grpc', xhttp: 'xhttp', httpupgrade: 'httpupgrade' })[type];
   const stream = { network };
   if (network === 'xhttp') {
-    if (t.mode !== undefined && !['auto', 'packet-up', 'stream-up', 'stream-one'].includes(t.mode)) failCode('config.xhttpMode');
+    // 3x-ui, Marzban and Happ put the XHTTP mode inside `extra`, while Xray
+    // expects it next to host/path. Lift it out instead of rejecting the node.
+    const extra = t.extra === undefined ? undefined : { ...t.extra };
+    const extraMode = extra && extra.mode !== undefined ? String(extra.mode) : undefined;
+    if (extra) delete extra.mode;
+    const mode = t.mode !== undefined ? t.mode : extraMode;
+    if (mode !== undefined && !['auto', 'packet-up', 'stream-up', 'stream-one'].includes(mode)) failCode('config.xhttpMode');
     if (t.path !== undefined && (typeof t.path !== 'string' || !t.path.startsWith('/'))) failCode('config.xhttpPath');
     if (t.host !== undefined && typeof t.host !== 'string') failCode('config.xhttpHost');
-    stream.xhttpSettings = { ...(t.host !== undefined ? { host: t.host } : {}), ...(t.path !== undefined ? { path: t.path } : {}), ...(t.mode !== undefined ? { mode: t.mode } : {}) };
-    if (t.extra !== undefined) { checkExtra(t.extra); stream.xhttpSettings.extra = t.extra; }
+    stream.xhttpSettings = { ...(t.host !== undefined ? { host: t.host } : {}), ...(t.path !== undefined ? { path: t.path } : {}), ...(mode !== undefined ? { mode } : {}) };
+    if (extra !== undefined && Object.keys(extra).length) { checkExtra(extra); stream.xhttpSettings.extra = extra; }
   } else if (network === 'ws') {
     if (t.path !== undefined && (typeof t.path !== 'string' || !t.path.startsWith('/'))) failCode('config.wsPath');
     if (t.headers !== undefined && (!object(t.headers) || Object.values(t.headers).some(v => typeof v !== 'string'))) failCode('config.wsHeaders');
@@ -165,7 +171,17 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
   let needsDirect = false, needsBlock = false;
   if (profileRules?.length) {
     for (const rule of profileRules) {
-      const entry = { type: 'field', outboundTag: rule.target === 'proxy' ? 'proxy' : rule.target, ...(rule.domains?.length ? { domain: rule.domains } : {}), ...(rule.ips?.length ? { ip: rule.ips } : {}), ...(rule.ports ? { port: rule.ports } : {}), ...(rule.domainStrategy ? { domainStrategy: rule.domainStrategy } : {}) };
+      const entry = {
+        type: 'field',
+        outboundTag: rule.target === 'proxy' ? 'proxy' : rule.target,
+        ...(rule.domains?.length ? { domain: rule.domains } : {}),
+        ...(rule.ips?.length ? { ip: rule.ips } : {}),
+        ...(rule.sources?.length ? { source: rule.sources } : {}),
+        ...(rule.ports ? { port: rule.ports } : {}),
+        ...(rule.network ? { network: rule.network } : {}),
+        ...(rule.domainStrategy ? { domainStrategy: rule.domainStrategy } : {}),
+        ...(rule.domainMatcher ? { domainMatcher: rule.domainMatcher } : {})
+      };
       if (rule.target === 'direct') needsDirect = true;
       if (rule.target === 'block') needsBlock = true;
       if (rule.target !== 'proxy') rules.push(entry);

@@ -48,16 +48,10 @@ jobs:
               ForEach-Object { Get-ItemProperty $_.PSPath } |
               Where-Object { $_.DisplayName -like '*Kartoshka*' -or $_.DisplayName -like '*артошка*' }
           }
-          function Normalize([string] $value) {
-            if (-not $value) { return '' }
-            # NSIS writes quoted paths: "D:\path". Compare them unquoted.
-            return $value.Trim().Trim('"').TrimEnd('\').ToLowerInvariant()
-          }
           function Get-AppEntry([string] $dir) {
-            $target = Normalize $dir
             Get-AllEntries | Where-Object {
-              (Normalize $_.InstallLocation) -eq $target -or
-              (Normalize (Split-Path -Parent ($_.DisplayIcon -replace '"',''))) -eq $target
+              ($_.InstallLocation -and $_.InstallLocation.TrimEnd('\') -eq $dir.TrimEnd('\')) -or
+              ($_.DisplayIcon -and $_.DisplayIcon -like "$dir*")
             } | Select-Object -First 1
           }
           function Wait-Gone([string] $path, [int] $seconds = 40) {

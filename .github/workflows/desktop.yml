@@ -205,6 +205,16 @@ jobs:
         with:
           path: release-assets
           pattern: kartoshka-vpn-*
+      - name: Normalise the installer file name
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer=$(find release-assets -name '*-setup.exe' -print -quit)
+          test -n "$installer" || { echo 'no NSIS installer in the artifact'; exit 1; }
+          version="${GITHUB_REF_NAME#v}"
+          cp "$installer" "release-assets/KartoshkaVPN_${version}_x64-setup.exe"
+          find release-assets -mindepth 2 -name '*-setup.exe' -delete
+          ls -l release-assets
       - name: Publish prerelease assets
         uses: softprops/action-gh-release@v2
         with:
