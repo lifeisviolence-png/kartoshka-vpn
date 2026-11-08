@@ -45,6 +45,33 @@ test('XHTTP сохраняет mode, host, path, extra и REALITY', () => {
   assert.equal(out.streamSettings.network, 'xhttp'); assert.deepEqual(out.streamSettings.xhttpSettings, {path:'/route', host:'cdn.example.test', mode:'stream-one', extra:{xmux:{maxConnections:1}}});
   assert.equal(out.streamSettings.realitySettings.password, key); assert.equal(out.settings.id, id);
 });
+test('XHTTP mode внутри extra поднимается наверх, а не отклоняется', () => {
+  // 3x-ui, Marzban и Happ кладут mode в extra; Xray ждёт его рядом с path.
+  const link = 'vless://11111111-1111-4111-8111-111111111111@x.example.com:443?type=xhttp&security=tls&sni=x.example.com&path=%2Fx&extra='
+    + encodeURIComponent(JSON.stringify({ mode: 'packet-up', scMaxEachPostBytes: 1000000, scMinPostsIntervalMs: 30, noGRPCHeader: true, xPaddingBytes: '100-1000' })) + '#XHTTP';
+  const { nodes, errors } = parseSubscriptionDetailed(link, {});
+  assert.equal(errors.length, 0, JSON.stringify(errors));
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].unsupported, undefined);
+  const settings = buildXrayConfig(nodes, nodes[0].id, 'auto', null).outbounds[0].streamSettings.xhttpSettings;
+  assert.equal(settings.mode, 'packet-up');
+  assert.equal(settings.extra.mode, undefined, 'mode не должен оставаться в extra');
+  assert.equal(settings.extra.scMaxEachPostBytes, 1000000);
+  assert.equal(settings.extra.noGRPCHeader, true);
+  assert.equal(settings.path, '/x');
+  // Явный mode на верхнем уровне важнее копии внутри extra.
+  const both = parseSubscriptionDetailed(link.replace('&extra=', '&mode=stream-up&extra='), {});
+  assert.equal(buildXrayConfig(both.nodes, both.nodes[0].id, 'auto', null).outbounds[0].streamSettings.xhttpSettings.mode, 'stream-up');
+});
+
+test('подсказки клиента support-* не считаются неизвестными параметрами', () => {
+  const link = 'vless://11111111-1111-4111-8111-111111111111@x.example.com:443?type=ws&security=tls&sni=x.example.com&path=%2Fws&support-x25519mlkem768=1#WS';
+  const { nodes, warnings, errors } = parseSubscriptionDetailed(link, {});
+  assert.equal(errors.length, 0);
+  assert.equal(nodes.length, 1);
+  assert.deepEqual(warnings.filter((w) => w.key === 'sub.unknownParam'), []);
+});
+
 test('loopback HTTP и SOCKS, единственный outbound выбранного прокси, без TUN', () => {
   const c = config(vless);
   assert.deepEqual(c.inbounds.map(({listen,port,protocol}) => ({listen,port,protocol})), [{listen:'127.0.0.1',port:2080,protocol:'http'},{listen:'127.0.0.1',port:2081,protocol:'socks'}]);

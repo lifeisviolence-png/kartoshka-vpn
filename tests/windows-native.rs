@@ -65,7 +65,7 @@ fn baseline(case: usize) {
     // cases describe the same inactive indicator; exact bytes are asserted after restore.
     assert_same_indicator("AutoDetect", &windows::get("AutoDetect").unwrap(), &dword(0));
     assert_same_indicator("ProxyEnable", &windows::get("ProxyEnable").unwrap(), &dword(0));
-    require_direct(&capture_proxy().unwrap()).expect("baseline must pass the production direct check");
+    require_no_foreign_proxy(&capture_proxy().unwrap()).expect("baseline must pass the production conflict check");
 }
 fn empty_runtime() -> ProxyRuntime { ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 } }
 fn disposable_ci() -> bool {
@@ -127,31 +127,22 @@ fn windows_monitor_retries_transient_errors_without_losing_fault() {
     assert_eq!(reason.as_deref(), Some("lost listener"));
 }
 
-// Each unsafe mode is set up and refused independently: a failure in one case does
-// not hide whether the others were actually exercised. Every test owns its registry
-// snapshot and restores the runner's exact original values on drop.
+// The only state that still blocks a start is another program actively proxying
+// through its own server: overwriting it would silently break that VPN. A PAC file
+// and auto-detect are captured, switched off for the session and restored, so they
+// are exercised in the override test below instead of being refused.
 fn refusal_case(mode: &str) {
     let _guard = RegistryGuard::capture();
     let env = NativeEnv::new();
     baseline(0);
-    let bit = match mode {
-        "proxy" => { windows::set_flags(2).unwrap(); 2 }
-        "pac" => {
-            windows::set("AutoConfigURL", &text("http://127.0.0.1:39021/proxy.pac")).unwrap();
-            windows::set_flags(1 | 4).unwrap();
-            4
-        }
-        "autodetect" => {
-            windows::set("AutoDetect", &dword(1)).unwrap();
-            windows::set_flags(1 | 8).unwrap();
-            8
-        }
-        _ => unreachable!(),
-    };
+    assert_eq!(mode, "proxy");
+    windows::set("ProxyServer", &text("127.0.0.1:7890")).unwrap();
+    windows::set("ProxyEnable", &dword(1)).unwrap();
+    windows::set_flags(2).unwrap();
     windows::notify().unwrap();
     let before = saved();
     let observed = windows::flags().unwrap();
-    assert_ne!(observed & bit, 0, "{mode}: WinINet did not activate bit {bit} (flags={observed}); {}", registry_dump());
+    assert_ne!(observed & 2, 0, "WinINet did not activate the proxy bit (flags={observed}); {}", registry_dump());
     let error = start_runtime(&mut empty_runtime(), &env.binary, &env.assets, &env.path, &env.config, None).unwrap_err();
     assert!(error.contains("заблокировано"), "{mode}: {error}");
     assert_saved(&before, &format!("{mode}: third-party settings must be untouched"));
@@ -165,17 +156,44 @@ fn windows_refuses_active_third_party_proxy() {
     let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
     refusal_case("proxy");
 }
-#[test]
-fn windows_refuses_active_pac() {
-    if !disposable_ci() { return; }
-    let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
-    refusal_case("pac");
+// Auto-detect is on by default on Windows and a PAC file is common on corporate
+// images. Both must connect and must come back exactly as they were.
+fn override_baseline(mode: &str) {
+    windows::set("ProxyServer", &text("старый proxy:8181")).unwrap();
+    windows::set("ProxyOverride", &text("<local>")).unwrap();
+    windows::set("ProxyEnable", &dword(0)).unwrap();
+    match mode {
+        "autodetect" => { windows::set("AutoConfigURL", &None).unwrap(); windows::set("AutoDetect", &dword(1)).unwrap(); }
+        "pac" => { windows::set("AutoConfigURL", &text("http://127.0.0.1:39021/proxy.pac")).unwrap(); windows::set("AutoDetect", &dword(0)).unwrap(); }
+        _ => unreachable!(),
+    }
+    windows::set_flags(1).unwrap();
+    windows::notify().unwrap();
+    assert!(has_pac(windows::flags().unwrap()), "{mode}: runner did not report PAC/auto-detect: {}", registry_dump());
 }
 #[test]
-fn windows_refuses_active_autodetect() {
+fn windows_overrides_pac_and_autodetect_and_restores_them() {
     if !disposable_ci() { return; }
     let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
-    refusal_case("autodetect");
+    let _guard = RegistryGuard::capture();
+    for mode in ["autodetect", "pac"] {
+        let env = NativeEnv::new();
+        override_baseline(mode);
+        let original = saved();
+        require_no_foreign_proxy(&capture_proxy().unwrap()).unwrap_or_else(|e| panic!("{mode}: {e}"));
+        let mut runtime = empty_runtime();
+        start_runtime(&mut runtime, &env.binary, &env.assets, &env.path, &env.config, None)
+            .unwrap_or_else(|e| panic!("{mode}: start must be allowed: {e}"));
+        let active = windows::flags().unwrap();
+        assert!(active & 2 != 0, "{mode}: local proxy must be on: {active}");
+        assert_no_pac(active, mode);
+        assert_eq!(windows::get("AutoConfigURL").unwrap(), None, "{mode}: PAC must be off while connected");
+        assert_same_indicator("AutoDetect", &windows::get("AutoDetect").unwrap(), &dword(0));
+        stop_runtime(&mut runtime).unwrap_or_else(|e| panic!("{mode}: restore failed: {e}"));
+        assert_saved(&original, &format!("{mode}: baseline must be restored byte for byte"));
+        assert!(!env.path.exists(), "{mode}: snapshot must be removed after restore");
+        println!("PASS {mode}: connected over the baseline and restored it exactly");
+    }
 }
 #[test]
 fn windows_refuses_restore_when_another_app_changes_flags() {
@@ -237,17 +255,20 @@ fn windows_xray_real_registry_transaction_and_rollback() {
     invalid["api"] = serde_json::json!({"tag":"bad"});
     assert!(validate_config(&invalid.to_string()).is_err());
     assert!(validate_config(&"x".repeat(MAX_CONFIG_BYTES + 1)).unwrap_err().contains("лимит"));
-    // FLAGS_UI may reflect a real registry write, so exercise contradictory captured
-    // indicators without weakening the production require_direct check.
-    for name in ["ProxyEnable", "AutoDetect"] {
-        baseline(0);
-        let mut snapshot = capture_proxy().unwrap();
-        assert_eq!(snapshot.before_flags, 1);
-        snapshot.changes.iter_mut().find(|change| change.name == name).unwrap().before = dword(1);
-        let error = require_direct(&snapshot).unwrap_err();
-        assert!(error.contains("заблокировано"), "{name}: {error}");
-        assert_eq!(windows::flags().unwrap(), 1, "synthetic conflict must not alter WinINet");
-    }
+    // A foreign active proxy is the only blocking state; auto-detect alone must
+    // pass so that a default Windows installation can connect.
+    baseline(0);
+    let mut snapshot = capture_proxy().unwrap();
+    snapshot.changes.iter_mut().find(|change| change.name == "ProxyServer").unwrap().before = text("third.example:3128");
+    snapshot.changes.iter_mut().find(|change| change.name == "ProxyEnable").unwrap().before = dword(1);
+    let error = require_no_foreign_proxy(&snapshot).unwrap_err();
+    assert!(error.contains("другой прокси-сервер"), "{error}");
+    assert_eq!(windows::flags().unwrap(), 1, "synthetic conflict must not alter WinINet");
+    let mut allowed = capture_proxy().unwrap();
+    allowed.changes.iter_mut().find(|change| change.name == "AutoDetect").unwrap().before = dword(1);
+    require_no_foreign_proxy(&allowed).expect("auto-detect alone must not block a start");
+    allowed.changes.iter_mut().find(|change| change.name == "AutoConfigURL").unwrap().before = text("http://10.0.0.1/proxy.pac");
+    require_no_foreign_proxy(&allowed).expect("a PAC file alone must not block a start");
     baseline(0);
     windows::set("ProxyServer", &text("third.example")).unwrap();
     let original = saved();

@@ -383,15 +383,28 @@ fn capture_proxy() -> Result<ProxySnapshot, String> {
     if has_pac(after_flags) != has_pac(before_flags) { return Err("Флаги WinINet изменились во время создания snapshot".into()); }
     Ok(ProxySnapshot { version: 2, changes, before_flags, applied_flags: 2 })
 }
-fn require_direct(snapshot: &ProxySnapshot) -> Result<(), String> {
-    // Unknown bits and contradictory registry indicators are also treated as unsafe.
-    let inactive = |name: &str| snapshot.changes.iter().find(|c| c.name == name)
-        .map(|c| c.before.is_none() || c.before == dword(0)).unwrap_or(false);
-    if snapshot.before_flags != 1 || !inactive("ProxyEnable") || !inactive("AutoDetect") {
-        return Err("В Windows уже активен proxy, PAC или автоопределение (либо состояние неоднозначно). Подключение заблокировано, чтобы не перезаписать настройки другого VPN. Проверьте настройки Windows и отключите их самостоятельно только если это безопасно.".into());
-    }
-    if snapshot.changes.iter().any(|c| c.name == "ProxyServer" && c.before == text(LOCAL_PROXY)) {
-        return Err("В сохранённых настройках уже указан 127.0.0.1:2080; источник неизвестен. Проверьте proxy вручную до подключения.".into());
+fn registry_text(value: &Option<RawValue>) -> Option<String> {
+    let value = value.as_ref()?;
+    if value.kind != 1 { return None; }
+    let units: Vec<u16> = value.bytes.chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .take_while(|unit| *unit != 0)
+        .collect();
+    if units.is_empty() { None } else { Some(String::from_utf16_lossy(&units)) }
+}
+fn indicator_on(value: &Option<RawValue>) -> bool {
+    matches!(value, Some(raw) if raw.kind == 4 && raw.bytes == 1u32.to_le_bytes())
+}
+// Refuse only when another program is actively proxying through its own server.
+// Auto-detect (WPAD) is on by default on Windows and a PAC file is common on
+// corporate images; both are captured, switched off for the session and restored
+// afterwards, so blocking on them would make the app unusable on a clean system.
+fn require_no_foreign_proxy(snapshot: &ProxySnapshot) -> Result<(), String> {
+    let before = |name: &str| snapshot.changes.iter().find(|c| c.name == name).and_then(|c| c.before.clone());
+    let server = registry_text(&before("ProxyServer")).unwrap_or_default();
+    let server = server.trim().to_string();
+    if indicator_on(&before("ProxyEnable")) && !server.is_empty() && server != LOCAL_PROXY {
+        return Err(format!("В Windows уже включён другой прокси-сервер ({server}). Подключение заблокировано, чтобы не перезаписать настройки другого VPN. Отключите его в параметрах Windows и повторите."));
     }
     Ok(())
 }
@@ -478,8 +491,10 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     let flags = windows::flags()?;
     // FLAGS is derived: a configured server adds the proxy bit even while
     // ProxyEnable=0, so only the PAC/auto-detect bits change the meaning here.
-    if has_pac(flags) != has_pac(snapshot.before_flags) {
-        return Err(format!("В WinINet включён PAC или автоопределение (флаги {flags}); snapshot сохранён, настройки не перезаписаны"));
+    // Activation itself clears PAC/auto-detect, therefore a PAC bit now is a
+    // third-party change only when the user did not have one before connecting.
+    if has_pac(flags) && !has_pac(snapshot.before_flags) {
+        return Err(format!("Другой программой включён PAC или автоопределение (флаги {flags}); snapshot сохранён, настройки не перезаписаны"));
     }
     let proxy_applied = flags & 2 != 0;
     let managed: Vec<&Change> = snapshot.changes.iter().filter(|c| c.managed).collect();
@@ -500,8 +515,10 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
             return Err("Неоднозначный активный proxy: ProxyServer не подтверждает владение КартошкаVPN. Настройки не изменены, snapshot сохранён".into());
         }
     }
-    let verify = |expected: &[Option<RawValue>], expected_flags: u32| -> Result<(), String> {
-        if has_pac(windows::flags()?) != has_pac(expected_flags) { return Err("Флаги WinINet изменились во время восстановления".into()); }
+    // FLAGS_UI lags registry writes, and restoring a PAC/auto-detect baseline
+    // brings the PAC bit back only after the notify below. Registry values are the
+    // source of truth here; the flags word is compared best-effort at the end.
+    let verify = |expected: &[Option<RawValue>], _expected_flags: u32| -> Result<(), String> {
         for (c, value) in managed.iter().zip(expected) {
             if !same_indicator(&c.name, &windows::get(&c.name)?, value) { return Err(format!("{} изменён другой программой во время восстановления", c.name)); }
         }
@@ -534,6 +551,10 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
         verify(&expected, snapshot.before_flags)?;
         Ok(())
     })();
+    // Publish the restored values, then give WinINet up to two seconds to derive
+    // the flags word again. A lagging FLAGS_UI is not a restore failure: the
+    // registry already holds the exact original values.
+    let _ = windows::notify();
     // Notify even if a partial recovery failed, but retain the snapshot in either
     // a write/conflict failure or a notification failure.
     let notification = windows::notify();
@@ -581,7 +602,9 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
         if fail_after == Some(writes) { return Err("Тестовая ошибка записи proxy".into()); }
     }
     let current_flags = windows::flags()?;
-    if has_pac(current_flags) != has_pac(snapshot.before_flags) { return Err(format!("Появился PAC/автоопределение после значений: {current_flags}; {}", dump())); }
+    // We write AutoConfigURL=None and AutoDetect=0, so the expected state after
+    // the values are applied is the applied_flags word, not the captured one.
+    if has_pac(current_flags) != has_pac(snapshot.applied_flags) { return Err(format!("Появился PAC/автоопределение после значений: {current_flags}; {}", dump())); }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
         if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился до включения WinINet", c.name)); }
@@ -791,7 +814,7 @@ fn activate_guarded(runtime: &mut ProxyRuntime, mut child: Child, path: &Path, f
         let result = (|| -> Result<(), String> {
             if path.exists() { return Err("Остался невосстановленный snapshot".into()); }
             let snapshot = capture_proxy()?;
-            require_direct(&snapshot)?;
+            require_no_foreign_proxy(&snapshot)?;
             save_snapshot(path, &snapshot)?;
             own_snapshot = true;
             watcher = Some(launch_watchdog(path, &child)?);
@@ -832,7 +855,7 @@ fn start_runtime(runtime: &mut ProxyRuntime, binary: &Path, assets: &Path, path:
     stop_runtime(runtime)?;
     if path.exists() { return Err("Остался невосстановленный snapshot: запуск заблокирован".into()); }
     if points_to_local_proxy()? { return Err("Windows уже указывает на 127.0.0.1:2080 без snapshot. Проверьте и восстановите настройки proxy вручную до подключения".into()); }
-    { let _lock = windows::lock()?; require_direct(&capture_proxy()?)?; }
+    { let _lock = windows::lock()?; require_no_foreign_proxy(&capture_proxy()?)?; }
     test_config(binary, assets, config_json)?;
     let mut child = spawn_xray(binary, assets, config_json, false)?;
     let ready = (|| -> Result<(), String> {

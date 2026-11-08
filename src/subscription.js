@@ -44,11 +44,14 @@ function parseUrl(raw) {
 // Parameters panels routinely attach that do not change the connection on the
 // client side. They are ignored explicitly, not silently, so diagnostics stay honest.
 const IGNORED_KEYS = ['ed', 'eh', 'headerType', 'remarks', 'remark'];
+// `support-*` flags describe what the client can do (for example
+// support-x25519mlkem768); they are not server parameters and are not warnings.
+const isClientHint = key => String(key).toLowerCase().startsWith('support-');
 function query(url, allowed, warnings = []) {
   const params = url.searchParams;
   for (const key of params.keys()) {
     if (params.getAll(key).length > 1 && !IGNORED_KEYS.includes(key)) issue('sub.duplicateParam', { key });
-    if (allowed.includes(key) || IGNORED_KEYS.includes(key)) continue;
+    if (allowed.includes(key) || IGNORED_KEYS.includes(key) || isClientHint(key)) continue;
     warnings.push(new ParseIssue('sub.unknownParam', { key }));
   }
   return params;
