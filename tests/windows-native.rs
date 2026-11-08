@@ -159,28 +159,34 @@ fn windows_refuses_active_third_party_proxy() {
 // Auto-detect is on by default on Windows and a PAC file is common on corporate
 // images. Both must connect and must come back exactly as they were.
 fn override_baseline(mode: &str) {
-    // Write FLAGS before the indicator values: setting FLAGS to direct makes
-    // WinINet delete AutoDetect/ProxyEnable instead of keeping what was written.
+    // The indicator values only survive when the FLAGS word asks for them: a
+    // direct FLAGS makes WinINet delete AutoDetect on the next notify.
     windows::set("ProxyServer", &text("старый proxy:8181")).unwrap();
     windows::set("ProxyOverride", &text("<local>")).unwrap();
-    windows::set("AutoConfigURL", &None).unwrap();
-    windows::set("AutoDetect", &dword(0)).unwrap();
     windows::set("ProxyEnable", &dword(0)).unwrap();
-    windows::set_flags(1).unwrap();
     match mode {
-        "autodetect" => windows::set("AutoDetect", &dword(1)).unwrap(),
-        "pac" => windows::set("AutoConfigURL", &text("http://127.0.0.1:39021/proxy.pac")).unwrap(),
+        "autodetect" => {
+            windows::set("AutoConfigURL", &None).unwrap();
+            windows::set("AutoDetect", &dword(1)).unwrap();
+            windows::set_flags(1 | 8).unwrap();
+        }
+        "pac" => {
+            windows::set("AutoConfigURL", &text("http://127.0.0.1:39021/proxy.pac")).unwrap();
+            windows::set("AutoDetect", &dword(0)).unwrap();
+            windows::set_flags(1 | 4).unwrap();
+        }
         _ => unreachable!(),
     }
     windows::notify().unwrap();
-    // FLAGS_UI does not reliably expose auto-detect on CI runners, and the app no
-    // longer looks at those bits when deciding whether to connect. The registry
-    // value is what activation saves and restores, so assert exactly that.
+    let flags = windows::flags().unwrap();
+    // FLAGS_UI does not reliably expose these bits, so the registry value is the
+    // contract: it is what activation captures and what restore must reproduce.
     match mode {
         "autodetect" => assert_same_indicator("AutoDetect", &windows::get("AutoDetect").unwrap(), &dword(1)),
-        "pac" => assert_eq!(windows::get("AutoConfigURL").unwrap(), text("http://127.0.0.1:39021/proxy.pac"), "{mode}: {}", registry_dump()),
+        "pac" => assert_eq!(windows::get("AutoConfigURL").unwrap(), text("http://127.0.0.1:39021/proxy.pac"), "{mode}: flags={flags}; {}", registry_dump()),
         _ => unreachable!(),
     }
+    println!("baseline {mode}: flags={flags}");
 }
 #[test]
 fn windows_overrides_pac_and_autodetect_and_restores_them() {
