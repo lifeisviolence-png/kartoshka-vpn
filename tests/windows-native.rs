@@ -169,7 +169,14 @@ fn override_baseline(mode: &str) {
     }
     windows::set_flags(1).unwrap();
     windows::notify().unwrap();
-    assert!(has_pac(windows::flags().unwrap()), "{mode}: runner did not report PAC/auto-detect: {}", registry_dump());
+    // FLAGS_UI does not reliably expose auto-detect on CI runners, and the app no
+    // longer looks at those bits when deciding whether to connect. The registry
+    // value is what activation saves and restores, so assert exactly that.
+    match mode {
+        "autodetect" => assert_same_indicator("AutoDetect", &windows::get("AutoDetect").unwrap(), &dword(1)),
+        "pac" => assert_eq!(windows::get("AutoConfigURL").unwrap(), text("http://127.0.0.1:39021/proxy.pac"), "{mode}: {}", registry_dump()),
+        _ => unreachable!(),
+    }
 }
 #[test]
 fn windows_overrides_pac_and_autodetect_and_restores_them() {
