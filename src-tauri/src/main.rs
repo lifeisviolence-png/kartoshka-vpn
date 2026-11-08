@@ -587,10 +587,15 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
     if has_pac(current_flags) != has_pac(snapshot.before_flags) { return Err(format!("Появился PAC/автоопределение до записи: {current_flags}; {}", dump())); }
     let mut writes = 0;
     let mut completed: Vec<&str> = Vec::new();
+    // The PAC bits disappear as soon as AutoConfigURL/AutoDetect are written, so the
+    // expected flag state follows the writes we already made instead of the capture.
+    let pac_expected = |done: &[&str]| -> bool {
+        if done.iter().any(|name| *name == "AutoConfigURL" || *name == "AutoDetect") { has_pac(snapshot.applied_flags) } else { has_pac(snapshot.before_flags) }
+    };
     for c in snapshot.changes.iter().filter(|c| c.managed) {
         check_watchdog(watchdog)?;
         let current_flags = windows::flags()?;
-        if has_pac(current_flags) != has_pac(snapshot.before_flags) { return Err(format!("Появился PAC/автоопределение перед записью {}: {current_flags}; {}", c.name, dump())); }
+        if has_pac(current_flags) != pac_expected(&completed) { return Err(format!("Появился PAC/автоопределение перед записью {}: {current_flags}; {}", c.name, dump())); }
         // Check the whole set again before each step. This narrows, but cannot eliminate,
         // races with external programs because Windows Registry has no compare-and-swap.
         for check in &snapshot.changes {
