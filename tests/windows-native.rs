@@ -159,15 +159,19 @@ fn windows_refuses_active_third_party_proxy() {
 // Auto-detect is on by default on Windows and a PAC file is common on corporate
 // images. Both must connect and must come back exactly as they were.
 fn override_baseline(mode: &str) {
+    // Write FLAGS before the indicator values: setting FLAGS to direct makes
+    // WinINet delete AutoDetect/ProxyEnable instead of keeping what was written.
     windows::set("ProxyServer", &text("старый proxy:8181")).unwrap();
     windows::set("ProxyOverride", &text("<local>")).unwrap();
+    windows::set("AutoConfigURL", &None).unwrap();
+    windows::set("AutoDetect", &dword(0)).unwrap();
     windows::set("ProxyEnable", &dword(0)).unwrap();
+    windows::set_flags(1).unwrap();
     match mode {
-        "autodetect" => { windows::set("AutoConfigURL", &None).unwrap(); windows::set("AutoDetect", &dword(1)).unwrap(); }
-        "pac" => { windows::set("AutoConfigURL", &text("http://127.0.0.1:39021/proxy.pac")).unwrap(); windows::set("AutoDetect", &dword(0)).unwrap(); }
+        "autodetect" => windows::set("AutoDetect", &dword(1)).unwrap(),
+        "pac" => windows::set("AutoConfigURL", &text("http://127.0.0.1:39021/proxy.pac")).unwrap(),
         _ => unreachable!(),
     }
-    windows::set_flags(1).unwrap();
     windows::notify().unwrap();
     // FLAGS_UI does not reliably expose auto-detect on CI runners, and the app no
     // longer looks at those bits when deciding whether to connect. The registry
