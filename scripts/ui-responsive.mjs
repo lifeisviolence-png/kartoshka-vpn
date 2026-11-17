@@ -69,8 +69,14 @@ await page.evaluate(() => {
   document.querySelector('[data-action="refresh"]')?.click();
 });
 await new Promise((resolve) => setTimeout(resolve, 1200));
-const after = await page.evaluate(() => document.querySelector('.main').scrollTop);
-report.scroll = { before, after, preserved: Math.abs(after - before.top) <= 2 };
+const after = await page.evaluate(() => {
+  const main = document.querySelector('.main');
+  return { top: main.scrollTop, max: main.scrollHeight - main.clientHeight };
+});
+// The offset may only shrink when the content itself became shorter: the browser
+// clamps it to the new maximum, which is not a jump to the top.
+const expected = Math.min(before.top, after.max);
+report.scroll = { before, after, expected, preserved: Math.abs(after.top - expected) <= 2 };
 writeFileSync(`${OUT}/report.json`, JSON.stringify(report, null, 2));
 console.log(JSON.stringify({ overflow: report.overflow.length, scroll: report.scroll, screens: report.screens.length }));
 if (report.overflow.length || !report.scroll.preserved) process.exitCode = 1;
