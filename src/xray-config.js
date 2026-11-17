@@ -35,6 +35,26 @@ function checkExtra(value) {
 }
 // Providers export either colon-separated hex (Chrome style) or bare 64 hex.
 const PIN = /^(?:(?:[0-9a-f]{2}:){31}[0-9a-f]{2}|[0-9a-f]{64})$/i;
+// Panels export the same XHTTP tuning either in camelCase (Xray) or in the
+// snake_case spelling used by some subscription generators. Both mean one field.
+const EXTRA_ALIASES = {
+  x_padding_bytes: 'xPaddingBytes', x_padding_key: 'xPaddingKey', x_padding_header: 'xPaddingHeader',
+  x_padding_placement: 'xPaddingPlacement', x_padding_method: 'xPaddingMethod', x_padding_obfs_mode: 'xPaddingObfsMode',
+  uplink_http_method: 'uplinkHTTPMethod', session_id_placement: 'sessionIDPlacement', session_id_key: 'sessionIDKey',
+  session_id_table: 'sessionIDTable', session_id_length: 'sessionIDLength', seq_placement: 'seqPlacement', seq_key: 'seqKey',
+  uplink_data_placement: 'uplinkDataPlacement', uplink_data_key: 'uplinkDataKey', uplink_chunk_size: 'uplinkChunkSize',
+  sc_max_each_post_bytes: 'scMaxEachPostBytes', sc_min_posts_interval_ms: 'scMinPostsIntervalMs',
+  sc_stream_up_server_secs: 'scStreamUpServerSecs', sc_max_buffered_posts: 'scMaxBufferedPosts',
+  server_max_header_bytes: 'serverMaxHeaderBytes', no_grpc_header: 'noGRPCHeader', no_sse_header: 'noSSEHeader',
+  download_settings: 'downloadSettings', h2_params: 'h2Params'
+};
+function normalizeExtra(extra) {
+  for (const [from, to] of Object.entries(EXTRA_ALIASES)) {
+    if (extra[from] !== undefined && extra[to] === undefined) extra[to] = extra[from];
+    if (from !== to) delete extra[from];
+  }
+  return extra;
+}
 function streamFor(outbound) {
   const t = outbound.transport;
   if (t !== undefined && t !== null && !object(t)) failCode('config.transport');
@@ -48,7 +68,7 @@ function streamFor(outbound) {
   if (network === 'xhttp') {
     // 3x-ui, Marzban and Happ put the XHTTP mode inside `extra`, while Xray
     // expects it next to host/path. Lift it out instead of rejecting the node.
-    const extra = t.extra === undefined ? undefined : { ...t.extra };
+    const extra = t.extra === undefined ? undefined : normalizeExtra({ ...t.extra });
     const extraMode = extra && extra.mode !== undefined ? String(extra.mode) : undefined;
     if (extra) delete extra.mode;
     const mode = t.mode !== undefined ? t.mode : extraMode;

@@ -1,4 +1,5 @@
 import { toXrayOutbound } from './xray-config.js';
+import { detectCountry } from './countries.js';
 
 // Parsing never throws for a single bad line: the caller decides whether a
 // partially readable subscription is still worth importing. Every diagnostic
@@ -19,16 +20,11 @@ function decodeBase64(value) {
 function decoded(value) { try { return decodeURIComponent(value); } catch { issue('sub.badPercent'); } }
 function cleanName(value, fallback) { const name = String(value || '').replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim(); return name && name.toLowerCase() !== 'undefined' ? name : fallback; }
 function locationFor(name) {
-  // Provider names and hostnames are not a reliable geolocation service. Only an
-  // explicitly supplied country flag is treated as a country, never substrings.
-  const places = [
-    ['🇩🇪', 'Германия', 'de'], ['🇳🇱', 'Нидерланды', 'nl'], ['🇫🇮', 'Финляндия', 'fi'],
-    ['🇫🇷', 'Франция', 'fr'], ['🇺🇸', 'США', 'us'], ['🇬🇧', 'Великобритания', 'gb'],
-    ['🇷🇺', 'Россия', 'ru'], ['🇺🇦', 'Украина', 'ua'], ['🇹🇷', 'Турция', 'tr'], ['🇸🇬', 'Сингапур', 'sg'],
-    ['🇯🇵', 'Япония', 'jp'], ['🇰🇿', 'Казахстан', 'kz'], ['🇦🇲', 'Армения', 'am'], ['🇬🇪', 'Грузия', 'ge']
-  ];
-  const matches = places.filter(([flag]) => name.includes(flag));
-  return matches.length === 1 ? { flag: matches[0][0], country: matches[0][1], countryCode: matches[0][2], city: '' } : { flag: '🌐', country: '', countryCode: '', city: '' };
+  // Provider names carry a flag or a country far more often than a hostname
+  // does. A missing hint stays empty and is filled later from the offline IP
+  // database; no name is ever guessed from a substring.
+  const { code, source } = detectCountry(name);
+  return { flag: code ? '' : '🌐', country: '', countryCode: code, countrySource: source, city: '' };
 }
 function makeNode(name, outbound, index, protocol) {
   name = cleanName(name, `${protocol} ${index + 1}`);

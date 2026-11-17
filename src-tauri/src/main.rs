@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod country;
+
 use std::{fs, io::Write, net::TcpStream as StdTcpStream, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
@@ -1015,14 +1017,39 @@ async fn test_proxy_latency() -> Result<Option<u32>, String> {
 }
 #[tauri::command]
 fn read_logs(app: AppHandle) -> Result<String, String> {
-    let path = app.path().app_config_dir().map_err(|e| e.to_string())?.join("kartoshka.log");
-    Ok(fs::read_to_string(path).unwrap_or_default())
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut text = fs::read_to_string(dir.join("kartoshka.log")).unwrap_or_default();
+    // The core log only exists while debug mode has been used at least once.
+    if let Ok(core) = fs::read_to_string(dir.join("core.log")) {
+        let tail: Vec<&str> = core.lines().rev().take(400).collect();
+        if !tail.is_empty() {
+            text.push_str("\n--- Xray core (debug) ---\n");
+            text.push_str(&tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+            text.push('\n');
+        }
+    }
+    Ok(text)
 }
 #[tauri::command]
-async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: String) -> Result<(), String> {
+async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: String, debug: Option<bool>) -> Result<(), String> {
     let path = snapshot_path(&app)?;
     let binary = xray_path()?;
     let assets = app.path().resource_dir().map_err(|e| format!("Не найдены ресурсы Xray: {e}"))?.join("xray-assets");
+    // Debug mode only changes where the core writes its own diagnostics: the
+    // process still receives the configuration over stdin and never logs secrets.
+    let mut config_json = config_json;
+    if debug == Some(true) {
+        let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+        fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать папку настроек: {e}"))?;
+        let mut root: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| format!("Некорректный JSON Xray: {e}"))?;
+        let log = root.as_object_mut().ok_or("Конфигурация должна быть объектом")?.entry("log").or_insert_with(|| serde_json::json!({}));
+        if let Some(log) = log.as_object_mut() {
+            log.insert("loglevel".into(), serde_json::json!("debug"));
+            log.insert("access".into(), serde_json::json!("none"));
+            log.insert("error".into(), serde_json::json!(dir.join("core.log").to_string_lossy()));
+        }
+        config_json = root.to_string();
+    }
     let runtime = state.0.clone();
     let (result, generation) = tauri::async_runtime::spawn_blocking(move || {
         let mut guard = runtime.lock().map_err(|_| "Ошибка блокировки состояния".to_string())?;
@@ -1080,6 +1107,94 @@ async fn stop_proxy(app: AppHandle, state: State<'_, ProxyState>) -> Result<(), 
     append_log(&app, &format!("Остановка proxy: {result:?}"));
     result
 }
+
+// Country flags are resolved offline: the subscription name first, then this
+// database. Nothing about the node is sent to an external geolocation service.
+static COUNTRY_DB: std::sync::OnceLock<Option<country::CountryDb>> = std::sync::OnceLock::new();
+fn country_db(app: &AppHandle) -> Option<&'static country::CountryDb> {
+    COUNTRY_DB.get_or_init(|| {
+        let mut candidates = Vec::new();
+        if let Ok(dir) = app.path().resource_dir() { candidates.push(dir.join("country-ipv4.bin.gz")); }
+        candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/country-ipv4.bin.gz"));
+        candidates.into_iter().find_map(|path| country::CountryDb::load(&path).ok())
+    }).as_ref()
+}
+
+#[derive(Serialize)]
+struct CountryLookup { host: String, code: Option<String> }
+
+#[tauri::command]
+async fn lookup_countries(app: AppHandle, hosts: Vec<String>) -> Vec<CountryLookup> {
+    let Some(db) = country_db(&app) else { return Vec::new(); };
+    let mut unique: Vec<String> = Vec::new();
+    for host in hosts {
+        let host = host.trim().trim_matches(['[', ']']).to_string();
+        if !host.is_empty() && !unique.iter().any(|item| item.eq_ignore_ascii_case(&host)) { unique.push(host); }
+    }
+    let mut result = Vec::new();
+    for host in unique {
+        let address = match host.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(address)) => Some(address),
+            Ok(std::net::IpAddr::V6(_)) => None,
+            Err(_) => match timeout(Duration::from_secs(3), tokio::net::lookup_host((host.as_str(), 0))).await {
+                Ok(Ok(addresses)) => addresses.filter_map(|item| match item.ip() { std::net::IpAddr::V4(address) => Some(address), _ => None }).next(),
+                _ => None,
+            },
+        };
+        let code = address.and_then(|address| db.lookup(address)).map(str::to_owned);
+        result.push(CountryLookup { host, code });
+    }
+    result
+}
+
+// Hysteria2 is UDP-based, so a TCP handshake says nothing about it. A short-lived
+// core instance on a random loopback port carries one real request instead; it
+// never touches the system proxy and is always killed.
+fn validate_probe_config(input: &str) -> Result<u16, String> {
+    if input.len() > MAX_CONFIG_BYTES { return Err(format!("Конфигурация Xray превышает лимит {MAX_CONFIG_BYTES} байт")); }
+    let root: serde_json::Value = serde_json::from_str(input).map_err(|e| format!("Некорректный JSON Xray: {e}"))?;
+    let obj = root.as_object().ok_or("Конфигурация должна быть объектом")?;
+    for key in obj.keys() { if !["log", "inbounds", "outbounds"].contains(&key.as_str()) { return Err(format!("Раздел Xray {key} не разрешён в режиме замера")); } }
+    let inbounds = root.get("inbounds").and_then(|v| v.as_array()).ok_or("Нет inbounds Xray")?;
+    if inbounds.len() != 1 { return Err("Для замера нужен ровно один inbound".into()); }
+    let inbound = &inbounds[0];
+    if inbound.get("listen").and_then(|v| v.as_str()) != Some("127.0.0.1") { return Err("Замер разрешён только на 127.0.0.1".into()); }
+    if inbound.get("protocol").and_then(|v| v.as_str()) != Some("http") { return Err("Для замера нужен HTTP inbound".into()); }
+    let port = inbound.get("port").and_then(|v| v.as_u64()).ok_or("Не указан порт замера")?;
+    if !(20000..=60000).contains(&port) { return Err("Порт замера вне разрешённого диапазона".into()); }
+    let outbounds = root.get("outbounds").and_then(|v| v.as_array()).ok_or("Нет outbounds Xray")?;
+    if outbounds.len() != 1 { return Err("Для замера нужен ровно один outbound".into()); }
+    Ok(port as u16)
+}
+
+async fn probe_through(child: &mut Child, port: u16) -> Result<u32, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait() { Ok(Some(status)) => return Err(format!("Ядро завершилось до замера ({status})")), Ok(None) => {}, Err(e) => return Err(format!("Не удалось проверить ядро: {e}")) }
+        if matches!(timeout(Duration::from_millis(200), TcpStream::connect(("127.0.0.1", port))).await, Ok(Ok(_))) { break; }
+        if Instant::now() >= deadline { return Err("Ядро не открыло локальный порт за 10 секунд".into()); }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(8)).proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).map_err(|e| e.to_string())?).build().map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    match client.get("https://www.gstatic.com/generate_204").send().await {
+        Ok(response) if response.status().is_success() => Ok(started.elapsed().as_millis().min(u32::MAX as u128) as u32),
+        Ok(response) => Err(format!("Пробный запрос вернул HTTP {}", response.status())),
+        Err(e) => Err(format!("Пробный запрос не прошёл: {}", e.without_url())),
+    }
+}
+
+#[tauri::command]
+async fn probe_node_latency(app: AppHandle, config_json: String) -> Result<u32, String> {
+    let port = validate_probe_config(&config_json)?;
+    let binary = xray_path()?;
+    let assets = app.path().resource_dir().map_err(|e| format!("Не найдены ресурсы Xray: {e}"))?.join("xray-assets");
+    let mut child = tauri::async_runtime::spawn_blocking(move || spawn_xray(&binary, &assets, &config_json, false)).await.map_err(|e| e.to_string())??;
+    let result = probe_through(&mut child, port).await;
+    let _ = stop_child(&mut child);
+    result
+}
+
 fn main() {
     // The watchdog is the same installed executable, dispatched before Tauri or GUI init.
     let args: Vec<_> = std::env::args_os().collect();
@@ -1094,7 +1209,7 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let _instance = match windows::one_instance() { Ok(v) => v, Err(e) => { windows::show_error(&e); return; } };
-    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 })))).invoke_handler(tauri::generate_handler![fetch_subscription, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, start_proxy, stop_proxy]).setup(|app| {
+    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 })))).invoke_handler(tauri::generate_handler![fetch_subscription, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }

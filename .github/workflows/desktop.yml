@@ -66,8 +66,12 @@ jobs:
           }
           if (-not (Select-String -Quiet -Path src-tauri/binaries/licenses/Xray-MPL-2.0.txt -Pattern 'Mozilla Public License Version 2.0')) { throw 'Missing Xray MPL-2.0 license' }
           Write-Output "Xray archive SHA256 $env:XRAY_SHA256 verified; wintun.dll is not shipped"
-      - name: Generate desktop icons
-        run: pnpm tauri icon src-tauri/icons/potato-mark.svg
+      - name: Verify committed desktop icons
+        shell: pwsh
+        run: |
+          foreach ($file in 'icon.ico','32x32.png','128x128.png','128x128@2x.png') {
+            if (-not (Test-Path "src-tauri/icons/$file")) { throw "Missing src-tauri/icons/$file" }
+          }
       - name: Build frontend for Rust test harness
         run: pnpm run build
       - name: Build executable for watchdog process tests

@@ -32,7 +32,8 @@ test('названия серверов с пробелами не разрыв�
   assert.deepEqual(result.errors, []); assert.equal(result.nodes.length, 2);
   assert.equal(result.nodes[0].name, '🇩🇪 Германия 1');
   assert.equal(result.nodes[1].name, '🇳🇱 Нидерланды 2 Gb');
-  assert.equal(result.nodes[1].country, 'Нидерланды');
+  assert.equal(result.nodes[1].countryCode, 'nl');
+  assert.equal(result.nodes[1].countrySource, 'emoji');
 });
 test('несколько ссылок в одной строке делятся только по схеме', () => {
   const body = `${vless.replace('#Test', '#Первая')} ${vless.replace('#Test', '#Вторая с пробелом')}`;
@@ -62,6 +63,19 @@ test('XHTTP mode внутри extra поднимается наверх, а не
   // Явный mode на верхнем уровне важнее копии внутри extra.
   const both = parseSubscriptionDetailed(link.replace('&extra=', '&mode=stream-up&extra='), {});
   assert.equal(buildXrayConfig(both.nodes, both.nodes[0].id, 'auto', null).outbounds[0].streamSettings.xhttpSettings.mode, 'stream-up');
+});
+
+test('snake_case поля XHTTP переносятся в extra.xPaddingBytes', () => {
+  const link = 'vless://11111111-1111-4111-8111-111111111111@x.example.com:443?type=xhttp&security=tls&sni=x.example.com&path=%2Fx&extra='
+    + encodeURIComponent(JSON.stringify({ mode: 'auto', x_padding_bytes: '100-1000', x_padding_key: 'secret', sc_max_each_post_bytes: 1000000 })) + '#XHTTP';
+  const { nodes, errors } = parseSubscriptionDetailed(link, {});
+  assert.equal(errors.length, 0, JSON.stringify(errors));
+  const extra = buildXrayConfig(nodes, nodes[0].id, 'auto', null).outbounds[0].streamSettings.xhttpSettings.extra;
+  assert.equal(extra.xPaddingBytes, '100-1000');
+  assert.equal(extra.xPaddingKey, 'secret');
+  assert.equal(extra.scMaxEachPostBytes, 1000000);
+  assert.equal(extra.x_padding_bytes, undefined, 'the alias must not leak into the config');
+  assert.equal(extra.sc_max_each_post_bytes, undefined);
 });
 
 test('подсказки клиента support-* не считаются неизвестными параметрами', () => {
