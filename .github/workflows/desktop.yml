@@ -117,10 +117,10 @@ jobs:
           }
           if (-not $testExe) { throw 'Windows test harness was not found' }
           Write-Output "Test harness: $($testExe.FullName)"
-          # The scheduled task runs only windows_native_tests::; the offline
-          # country database needs no interactive session and runs here.
-          & $testExe.FullName country:: --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw "Country database tests failed ($LASTEXITCODE)" }
+          # The scheduled task runs only windows_native_tests::; everything else
+          # (offline country database, pin formatting) needs no interactive session.
+          & $testExe.FullName --skip windows_native_tests:: --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw "Non-interactive Rust tests failed ($LASTEXITCODE)" }
           # The GitHub runner's Job can prohibit CREATE_BREAKAWAY_FROM_JOB. A
           # same-user interactive scheduled task is an independent launch path,
           # not a relaxation of the production watchdog's IsProcessInJob check.
