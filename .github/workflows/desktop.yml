@@ -103,10 +103,20 @@ jobs:
           $env:KARTOVPN_WATCHDOG_TEST_EXE = (Resolve-Path "src-tauri/target/$env:TARGET/debug/kartoshka-vpn.exe").Path
           $env:XRAY_TEST_BINARY = (Resolve-Path "src-tauri/binaries/xray-$env:TARGET.exe").Path
           $env:XRAY_TEST_ASSETS = (Resolve-Path 'src-tauri/binaries/xray-assets').Path
-          cargo test --manifest-path src-tauri/Cargo.toml --target $env:TARGET --no-run
+          $build = cargo test --manifest-path src-tauri/Cargo.toml --target $env:TARGET --no-run 2>&1
+          $build | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { throw "Windows test compilation failed ($LASTEXITCODE)" }
-          $testExe = Get-ChildItem "src-tauri/target/$env:TARGET/debug/deps/kartoshka_vpn-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          # Cargo prints where it put the harness; the layout differs between runners,
+          # so trust that path first and fall back to a search.
+          $testExe = $null
+          foreach ($line in $build) {
+            if ("$line" -match 'Executable unittests .*\((.+\.exe)\)') { $testExe = Get-Item $Matches[1]; break }
+          }
+          if (-not $testExe) {
+            $testExe = Get-ChildItem -Path "src-tauri/target/$env:TARGET/debug" -Recurse -Filter 'kartoshka_vpn-*.exe' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          }
           if (-not $testExe) { throw 'Windows test harness was not found' }
+          Write-Output "Test harness: $($testExe.FullName)"
           # The GitHub runner's Job can prohibit CREATE_BREAKAWAY_FROM_JOB. A
           # same-user interactive scheduled task is an independent launch path,
           # not a relaxation of the production watchdog's IsProcessInJob check.
