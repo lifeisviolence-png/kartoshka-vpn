@@ -107,7 +107,7 @@ async function startStand(kind, dir) {
   }
   const node = parseSubscriptionDetailed(nodeUri).nodes[0];
   if (!node) throw new Error(`не удалось разобрать ${kind}`);
-  const config = buildXrayConfig([node], node.id, 'all');
+  const config = buildXrayConfig([node], node.id, 'all', null, { perf: JSON.parse(env.PERF_OPTS || '{}') });
   writeFileSync(serverPath, JSON.stringify(serverConfig), { mode: 0o600 });
   writeFileSync(clientPath, JSON.stringify(config), { mode: 0o600 });
   const server = spawn(XRAY, ['run', '-config', serverPath], { stdio: ['ignore', 'ignore', 'pipe'] });

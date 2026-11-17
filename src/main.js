@@ -269,6 +269,7 @@ function toastMarkup() {
   if (!state.toast) return '';
   return `<div class="toast" role="status"><span>${escapeHtml(state.toast.text)}</span>${state.toast.action ? `<button class="toast-action" data-action="toast-action">${escapeHtml(state.toast.actionLabel)}</button>` : ''}<button class="icon-button" data-action="dismiss-toast" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 13)}</button></div>`;
 }
+let lastMarkup = '';
 function render() {
   const previous = document.activeElement;
   const focusKey = previous?.getAttribute?.('data-focus-key') || previous?.id || null;
@@ -277,7 +278,7 @@ function render() {
   const closingModal = !state.modal && modalPreviouslyOpen;
   const node = selectedNode();
   const title = t(`nav.${state.activeNav}`);
-  app.innerHTML = `<div class="shell">
+  const markup = `<div class="shell">
     <aside class="sidebar">
       <div class="brand"><img class="brand-mark" src="/potato-mark.png" alt=""/><div class="brand-copy"><strong>Kartoshka<span>VPN</span></strong><small>${escapeHtml(t('app.tagline'))}</small></div></div>
       <nav class="nav" aria-label="${escapeHtml(t('app.navigation'))}">
@@ -292,6 +293,11 @@ function render() {
       <footer class="footer-note"><span>${icon('shield', 13)} ${escapeHtml(t('footer.proxy'))}</span><span>${escapeHtml(t('footer.direct'))}</span></footer>
     </main>
   </div>${state.modal === 'add' ? modalMarkup() : state.modal === 'result' ? resultMarkup() : state.modal === 'delete-sub' ? deleteMarkup() : ''}${toastMarkup()}`;
+  // A tick that changes nothing must not rebuild the DOM: it would drop focus,
+  // scroll position and text selection for no reason.
+  if (markup === lastMarkup && !openingModal && !closingModal) { modalPreviouslyOpen = Boolean(state.modal); return; }
+  lastMarkup = markup;
+  app.innerHTML = markup;
   bindEvents();
   if (openingModal) document.querySelector('#import-input')?.focus();
   else if (closingModal) (document.querySelector('[data-action="add"]') || document.querySelector('[data-action="refresh"]'))?.focus();
@@ -350,6 +356,7 @@ function homeMarkup(selected) {
         <div class="quick-grid">
           <button class="quick" data-nav="servers">${icon('server', 16)}<span>${escapeHtml(t('home.allServers'))}</span><strong>${state.servers.length}</strong></button>
           <button class="quick" data-nav="settings">${icon('settings', 16)}<span>${escapeHtml(t('home.route'))}</span><strong>${escapeHtml(t(`route.short.${state.routeMode}`))}</strong></button>
+          <button class="quick" data-action="speed-test" ${state.connection !== 'connected' || state.speedRunning ? 'disabled' : ''}>${icon('activity', 16)}<span>${escapeHtml(t('speed.title'))}</span><strong>${state.speedRunning ? '…' : (state.speed ? `${state.speed.down} ${t('speed.unit')}` : '—')}</strong></button>
           <button class="quick" data-action="ping-all" ${state.pingJob ? 'disabled' : ''}>${icon('activity', 16)}<span>${escapeHtml(t('home.checkPing'))}</span><strong>${state.pingJob ? `${state.pingJob.done}/${state.pingJob.total}` : '—'}</strong></button>
           <button class="quick" data-nav="logs">${icon('logs', 16)}<span>${escapeHtml(t('home.logs'))}</span><strong>${state.logs.length}</strong></button>
         </div>
@@ -451,6 +458,7 @@ function serversMarkup(node) {
 }
 
 function settingsMarkup() {
+  const nodeMode = state.settings?.nodeMode === 'auto' ? 'auto' : 'single';
   const dnsMode = dnsModeIds.includes(state.settings?.dns) ? state.settings.dns : 'system';
   const source = state.routing?.profile ? t('settings.routeSourceSubscription') : t('settings.routeSourceBuiltin');
   const rejected = state.routing?.unsupported?.length || 0;
@@ -459,6 +467,11 @@ function settingsMarkup() {
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.general'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.language'))}</strong><small>${escapeHtml(t('settings.languageHint'))}</small></div><select id="language" aria-label="${escapeHtml(t('settings.language'))}"><option value="ru" ${state.language === 'ru' ? 'selected' : ''}>${escapeHtml(t('settings.languageRu'))}</option><option value="en" ${state.language === 'en' ? 'selected' : ''}>${escapeHtml(t('settings.languageEn'))}</option></select></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.routeMode'))}</strong><small>${escapeHtml(routeDescription(state.routeMode))}${escapeHtml(state.connection === 'connected' ? t('settings.routeHintConnected') : '')}<br/>${routeNote}</small></div><select id="route-mode" aria-label="${escapeHtml(t('settings.routeMode'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${routeModeIds.map((id) => `<option value="${id}" ${id === state.routeMode ? 'selected' : ''}>${escapeHtml(routeTitle(id))}</option>`).join('')}</select></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.nodeMode'))}</strong><small>${escapeHtml(t(`settings.nodeMode.${nodeMode}.hint`))}</small></div><select id="node-mode" aria-label="${escapeHtml(t('settings.nodeMode'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}><option value="single" ${nodeMode === 'single' ? 'selected' : ''}>${escapeHtml(t('settings.nodeMode.single'))}</option><option value="auto" ${nodeMode === 'auto' ? 'selected' : ''}>${escapeHtml(t('settings.nodeMode.auto'))}</option></select></div>
+      <div class="setting"><div><strong>${escapeHtml(t('speed.url'))}</strong><small>${escapeHtml(t('speed.urlHint'))}</small></div><input id="speed-url" type="url" class="text-input" placeholder="https://" value="${escapeHtml(state.settings?.speedUrl || '')}"/></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.perf.sniffing'))}</strong><small>${escapeHtml(t('settings.perf.sniffingHint'))}</small></div><label class="switch"><input type="checkbox" id="perf-sniffing" ${state.settings?.perf?.sniffing ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.perf.preferIPv4'))}</strong><small>${escapeHtml(t('settings.perf.preferIPv4Hint'))}</small></div><label class="switch"><input type="checkbox" id="perf-ipv4" ${state.settings?.perf?.preferIPv4 ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.perf.tcpFastOpen'))}</strong><small>${escapeHtml(t('settings.perf.tcpFastOpenHint'))}</small></div><label class="switch"><input type="checkbox" id="perf-tfo" ${state.settings?.perf?.tcpFastOpen ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.debug'))}</strong><small>${escapeHtml(t('settings.debugHint'))}</small></div><label class="switch"><input type="checkbox" id="debug-mode" ${state.settings?.debug ? 'checked' : ''}/><span></span></label></div>
     </div>
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.data'))}</span></div>
@@ -484,6 +497,8 @@ function statsMarkup() {
     <div class="stat-card"><span>${escapeHtml(t('stats.subscriptions'))}</span><strong>${state.subscriptions.length}</strong></div>
     <div class="stat-card"><span>${escapeHtml(t('stats.used'))}</span><strong>${totalUsed ? formatBytes(totalUsed) : '—'}</strong></div>
     <div class="stat-card"><span>${escapeHtml(t('stats.limit'))}</span><strong>${totalLimit ? formatBytes(totalLimit) : '—'}</strong></div>
+    <div class="stat-card"><span>${escapeHtml(t('speed.title'))}</span><strong>${state.speed ? `${state.speed.down} / ${state.speed.up} ${t('speed.unit')}` : '—'}</strong></div>
+    <div class="stat-card"><span>${escapeHtml(t('speed.latency'))}</span><strong>${state.speed ? `${state.speed.latency} ${t('unit.ms')}` : '—'}</strong></div>
     <div class="stat-card"><span>${escapeHtml(t('stats.latency'))}</span><strong class="${pingClass(state.proxyPing)}">${Number.isFinite(state.proxyPing) ? `${state.proxyPing} ${t('unit.ms')}` : '—'}</strong></div>
   </div><p class="muted small">${escapeHtml(t('stats.note'))}</p></section>`;
 }
@@ -576,6 +591,7 @@ function bindEvents() {
   document.querySelector('[data-action="ping"]')?.addEventListener('click', () => pingOne(selectedNode()));
   document.querySelector('[data-action="proxy-ping"]')?.addEventListener('click', () => pingProxy());
   document.querySelector('[data-action="ping-all"]')?.addEventListener('click', () => pingAll());
+  document.querySelector('[data-action="speed-test"]')?.addEventListener('click', () => runSpeedTest());
   document.querySelector('[data-action="cancel-ping"]')?.addEventListener('click', () => { if (state.pingJob) { state.pingJob.cancelled = true; render(); } });
   document.querySelector('[data-action="favorite"]')?.addEventListener('click', () => { const node = selectedNode(); if (node) { commitData({ servers: state.servers.map((item) => item.id === node.id ? { ...item, favorite: !item.favorite } : item) }); render(); } });
   document.querySelector('[data-action="remove"]')?.addEventListener('click', () => {
@@ -594,6 +610,12 @@ function bindEvents() {
     if (busy() || state.connection === 'connected' || state.cleanupNeeded) return;
     if (routeModeIds.includes(event.target.value)) { commitData({ routeMode: event.target.value }); render(); }
   });
+  document.querySelector('#speed-url')?.addEventListener('change', (event) => {
+    commitData({ settings: { ...(state.settings || {}), speedUrl: String(event.target.value || '').trim() } }); render();
+  });
+  document.querySelector('#node-mode')?.addEventListener('change', (event) => {
+    if (['single', 'auto'].includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), nodeMode: event.target.value } }); render(); }
+  });
   document.querySelector('#dns-mode')?.addEventListener('change', (event) => {
     if (dnsModeIds.includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), dns: event.target.value } }); render(); }
   });
@@ -604,6 +626,11 @@ function bindEvents() {
     commitData({ language, settings: { ...(state.settings || {}), language } });
     render();
   });
+  for (const [id, key] of [['perf-sniffing', 'sniffing'], ['perf-ipv4', 'preferIPv4'], ['perf-tfo', 'tcpFastOpen']]) {
+    document.querySelector(`#${id}`)?.addEventListener('change', (event) => {
+      commitData({ settings: { ...(state.settings || {}), perf: { ...(state.settings?.perf || {}), [key]: event.target.checked } } }); render();
+    });
+  }
   document.querySelectorAll('#debug-mode').forEach((input) => input.addEventListener('change', (event) => {
     const debug = Boolean(event.target.checked);
     commitData({ settings: { ...(state.settings || {}), debug } });
@@ -873,6 +900,41 @@ async function measureNode(node) {
   } catch { return null; }
 }
 
+// The measurement runs inside the WebView, so it uses the system proxy the app
+// has just configured and therefore the same path as any other application.
+async function runSpeedTest() {
+  const url = String(state.settings?.speedUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) { setMessage('speed.needUrl'); state.page = 'settings'; render(); return; }
+  if (state.connection !== 'connected' || state.speedRunning) return;
+  state.speedRunning = true; state.transferActive = true; setMessage('speed.running'); render();
+  try {
+    const times = [];
+    for (let index = 0; index < 3; index += 1) {
+      const started = performance.now();
+      await fetch(url, { method: 'HEAD', cache: 'no-store' });
+      times.push(performance.now() - started);
+    }
+    const latency = Math.round(times.sort((a, b) => a - b)[1]);
+    const downloadStart = performance.now();
+    const response = await fetch(url, { cache: 'no-store' });
+    const reader = response.body.getReader();
+    let bytes = 0;
+    for (;;) { const { done, value } = await reader.read(); if (done) break; bytes += value.length; }
+    const down = bytes * 8 / ((performance.now() - downloadStart) / 1000) / 1e6;
+    const size = 4 * 1024 * 1024;
+    const uploadStart = performance.now();
+    try { await fetch(url, { method: 'POST', body: new Blob([new Uint8Array(size)]), cache: 'no-store' }); } catch { /* сервер может не принимать POST; время отправки всё равно измерено */ }
+    const up = size * 8 / ((performance.now() - uploadStart) / 1000) / 1e6;
+    state.speed = { at: Date.now(), url, latency, down: Math.round(down * 10) / 10, up: Math.round(up * 10) / 10 };
+    commitData({ speed: state.speed });
+    setMessage('speed.done');
+  } catch (error) {
+    setMessage('speed.failed', { error: errorText(error) });
+  } finally {
+    state.speedRunning = false; state.transferActive = false; render();
+  }
+}
+
 async function pingAll() {
   if (state.pingJob || !capabilities.native || state.transferActive) return;
   const nodes = [...state.servers];
@@ -970,6 +1032,14 @@ async function collectDiagnostics() {
     return lines.join('\n');
   } catch { return ''; }
 }
+function autoPool(selected) {
+  if (state.settings?.nodeMode !== 'auto' || !selected) return [];
+  const usable = state.servers.filter((item) => item.id !== selected.id && !unsupportedReason(item) && !item.unsupported);
+  const favorites = usable.filter((item) => item.favorite);
+  const sameCountry = selected.country ? usable.filter((item) => item.country === selected.country && !item.favorite) : [];
+  return [selected, ...(favorites.length ? favorites : sameCountry).slice(0, 5)];
+}
+
 async function startSelected(node) {
   if (!node || unsupportedReason(node)) return;
   if (!capabilities.native || !state.bridgeReady || state.cleanupNeeded) {
@@ -983,7 +1053,8 @@ async function startSelected(node) {
     // Pin the stored node, not a copy: the fingerprint must survive the session.
     if (node.needsPin) { setMessage('state.pinning'); render(); await ensurePin(node); }
     const snapshotNode = copyNode(node);
-    const config = buildXrayConfig([snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: state.settings?.dns });
+    const pool = autoPool(snapshotNode);
+    const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: state.settings?.dns, perf: state.settings?.perf, auto: pool.length > 1 ? pool : undefined });
     const result = await desktopBridge.connect({ config, debug: Boolean(state.settings?.debug) });
     if (result?.ok === false) throw Object.assign(new Error('proxyLaunchFailed'), { code: 'proxyLaunchFailed', params: { error: errorText(result.error) } });
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringConnect'), { code: 'xrayExitedDuringConnect' });
