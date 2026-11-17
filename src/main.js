@@ -10,6 +10,7 @@ import { migrateState, snapshot, subscriptionIdFor, subscriptionNameFor, mergeSu
 
 const capabilities = desktopBridge.getCapabilities();
 const routeModeIds = ['all', 'auto', 'split'];
+const dnsModeIds = ['system', 'builtin'];
 const directScheme = /^(vless|vmess|trojan|ss|shadowsocks|hysteria2|hy2):\/\//i;
 const storageKey = 'kartoshka.state.v2';
 const legacyKey = 'kartoshka.state.v1';
@@ -449,6 +450,7 @@ function serversMarkup(node) {
 }
 
 function settingsMarkup() {
+  const dnsMode = dnsModeIds.includes(state.settings?.dns) ? state.settings.dns : 'system';
   const source = state.routing?.profile ? t('settings.routeSourceSubscription') : t('settings.routeSourceBuiltin');
   const rejected = state.routing?.unsupported?.length || 0;
   const routeNote = `${escapeHtml(t('settings.routeSource', { source }))}${rejected ? `<br/><span class="warn-text">${escapeHtml(t('settings.routeUnsupported', { count: rejected }))}</span>` : ''}${state.routing?.dns ? `<br/><span class="muted">${escapeHtml(t('settings.routeDnsIgnored'))}</span>` : ''}`;
@@ -465,7 +467,7 @@ function settingsMarkup() {
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.unavailableTitle'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
-      <div class="setting muted"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t('settings.dnsHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.hint`))}</small></div><select id="dns-mode" aria-label="${escapeHtml(t('settings.dns'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${dnsModeIds.map((id) => `<option value="${id}" ${id === dnsMode ? 'selected' : ''}>${escapeHtml(t(`settings.dnsMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
 }
@@ -590,6 +592,9 @@ function bindEvents() {
   document.querySelector('#route-mode')?.addEventListener('change', (event) => {
     if (busy() || state.connection === 'connected' || state.cleanupNeeded) return;
     if (routeModeIds.includes(event.target.value)) { commitData({ routeMode: event.target.value }); render(); }
+  });
+  document.querySelector('#dns-mode')?.addEventListener('change', (event) => {
+    if (dnsModeIds.includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), dns: event.target.value } }); render(); }
   });
   document.querySelector('#language')?.addEventListener('change', (event) => {
     const language = event.target.value === 'en' ? 'en' : 'ru';
@@ -977,7 +982,7 @@ async function startSelected(node) {
     // Pin the stored node, not a copy: the fingerprint must survive the session.
     if (node.needsPin) { setMessage('state.pinning'); render(); await ensurePin(node); }
     const snapshotNode = copyNode(node);
-    const config = buildXrayConfig([snapshotNode], snapshotNode.id, route, state.routing?.profile || null);
+    const config = buildXrayConfig([snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: state.settings?.dns });
     const result = await desktopBridge.connect({ config, debug: Boolean(state.settings?.debug) });
     if (result?.ok === false) throw Object.assign(new Error('proxyLaunchFailed'), { code: 'proxyLaunchFailed', params: { error: errorText(result.error) } });
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringConnect'), { code: 'xrayExitedDuringConnect' });

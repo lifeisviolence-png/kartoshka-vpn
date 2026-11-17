@@ -247,3 +247,22 @@ test('xray run -test проверяет каждый сгенерированн�
     assert.equal(split.status, 0, `routing requires geoip.dat and geosite.dat: ${split.stderr} ${split.stdout}`);
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
+test('DNS: system не добавляет резолвер, builtin включает DoH, кэш и .ru-сервер', () => {
+  const node = parseOne(vless);
+  const system = buildXrayConfig([node], node.id, 'split', null, { dns: 'system' });
+  assert.equal(system.dns, undefined);
+  assert.equal(system.routing.domainStrategy, 'IPIfNonMatch');
+  const builtin = buildXrayConfig([node], node.id, 'split', null, { dns: 'builtin' });
+  assert.equal(builtin.routing.domainStrategy, 'IPIfNonMatch');
+  assert.equal(builtin.dns.disableCache, false);
+  assert.equal(builtin.dns.queryStrategy, 'UseIPv4');
+  assert.ok(builtin.dns.servers.some((server) => String(server.address).startsWith('https://')));
+  assert.ok(builtin.dns.servers.some((server) => server.address === '77.88.8.8' && server.domains.includes('domain:ru')));
+  // Unknown values must not silently disable resolution for rules.
+  const fallback = buildXrayConfig([node], node.id, 'split', null, { dns: 'nonsense' });
+  assert.equal(fallback.dns, undefined);
+  // Without rules there is nothing to resolve, so no resolver and no routing block.
+  const all = buildXrayConfig([node], node.id, 'all', null, { dns: 'builtin' });
+  assert.equal(all.dns, undefined);
+  assert.equal(all.routing, undefined);
+});

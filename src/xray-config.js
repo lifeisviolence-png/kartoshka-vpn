@@ -181,7 +181,25 @@ const DEFAULT_DIRECT = {
   ips: ['geoip:ru', 'geoip:private', '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10']
 };
 
-export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = null) {
+// DNS modes, measured in docs/perf.md:
+//   system  — no dns block, exactly 0.9.0: the core never resolves a name on its
+//             own, so IP rules cannot match a domain destination;
+//   builtin — the core resolves through DoH and keeps the answers, so IP rules
+//             work and the provider domain never reaches the local resolver.
+export const DNS_MODES = ['system', 'builtin'];
+function builtinDns() {
+  return {
+    servers: [
+      { address: 'https://1.1.1.1/dns-query', domains: ['geosite:geolocation-!cn'], skipFallback: true },
+      { address: '77.88.8.8', domains: ['domain:ru', 'geosite:category-ru'], skipFallback: true },
+      { address: '8.8.8.8' }
+    ],
+    queryStrategy: 'UseIPv4',
+    disableCache: false
+  };
+}
+
+export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = null, options = {}) {
   if (!['all', 'auto', 'split'].includes(routeMode)) failCode('config.routeMode');
   if (!Array.isArray(nodes)) failCode('config.nodes');
   const selected = nodes.find(node => node?.id === selectedId);
@@ -211,6 +229,10 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
     rules.push({ type: 'field', domain: DEFAULT_DIRECT.domains, outboundTag: 'direct' });
     rules.push({ type: 'field', ip: DEFAULT_DIRECT.ips, outboundTag: 'direct' });
   }
+  const dnsMode = DNS_MODES.includes(options.dns) ? options.dns : 'system';
+  // Without rules nothing needs an address, so the core must not resolve names
+  // on the client: that is both a delay and a leak to the local resolver.
+  const domainStrategy = rules.length ? 'IPIfNonMatch' : 'AsIs';
   const outbounds = [toXrayOutbound(selected)];
   if (needsDirect) outbounds.push({ tag: 'direct', protocol: 'freedom' });
   if (needsBlock) outbounds.push({ tag: 'block', protocol: 'blackhole' });
@@ -221,6 +243,7 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
       { tag: 'socks-in', listen: '127.0.0.1', port: 2081, protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' } }
     ],
     outbounds,
-    ...(rules.length ? { routing: { domainStrategy: 'IPIfNonMatch', rules } } : {})
+    ...(rules.length ? { routing: { domainStrategy, rules } } : {}),
+    ...(rules.length && dnsMode === 'builtin' ? { dns: builtinDns() } : {})
   };
 }
