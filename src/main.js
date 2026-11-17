@@ -269,16 +269,13 @@ function toastMarkup() {
   if (!state.toast) return '';
   return `<div class="toast" role="status"><span>${escapeHtml(state.toast.text)}</span>${state.toast.action ? `<button class="toast-action" data-action="toast-action">${escapeHtml(state.toast.actionLabel)}</button>` : ''}<button class="icon-button" data-action="dismiss-toast" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 13)}</button></div>`;
 }
-let lastMarkup = '';
-function render() {
-  const previous = document.activeElement;
-  const focusKey = previous?.getAttribute?.('data-focus-key') || previous?.id || null;
-  const oldSelection = previous && typeof previous.selectionStart === 'number' ? [previous.selectionStart, previous.selectionEnd] : null;
-  const openingModal = Boolean(state.modal) && !modalPreviouslyOpen;
-  const closingModal = !state.modal && modalPreviouslyOpen;
-  const node = selectedNode();
-  const title = t(`nav.${state.activeNav}`);
-  const markup = `<div class="shell">
+let shellSignature = '';
+let lastPageMarkup = '';
+let lastModalMarkup = '';
+let lastToastMarkup = '';
+
+function shellMarkup() {
+  return `<div class="shell">
     <aside class="sidebar">
       <div class="brand"><img class="brand-mark" src="/potato-mark.png" alt=""/><div class="brand-copy"><strong>Kartoshka<span>VPN</span></strong><small>${escapeHtml(t('app.tagline'))}</small></div></div>
       <nav class="nav" aria-label="${escapeHtml(t('app.navigation'))}">
@@ -287,17 +284,78 @@ function render() {
       <div class="sidebar-bottom">${navItem('about', 'info', t('nav.about'))}<div class="sidebar-foot"><span class="foot-dot ${state.connection === 'connected' ? 'on' : ''}"></span><span>${escapeHtml(capabilities.native ? t('app.windowsXray') : t('app.previewMode'))}</span></div><span class="sidebar-version">v${escapeHtml(VERSION)}</span></div>
     </aside>
     <main class="main">
-      <header class="topbar"><div class="topbar-title"><h1>${escapeHtml(title)}</h1><span class="topbar-sub">${escapeHtml(capabilities.native ? t('app.windowsProxy') : t('app.preview'))}</span></div><div class="topbar-actions">${state.connection === 'connected' ? `<span class="session-chip">${icon('clock', 13)}<span data-duration>${formatDuration()}</span></span>` : ''}<button class="icon-button" data-action="refresh" aria-label="${escapeHtml(t('app.refresh'))}" title="${escapeHtml(t('app.refresh'))}" ${state.importing ? 'disabled' : ''}>${icon('refresh', 15)}</button></div></header>
-      ${renderNotice()}
-      ${state.activeNav === 'home' ? homeMarkup(node) : state.activeNav === 'servers' ? serversMarkup(node) : state.activeNav === 'settings' ? settingsMarkup() : state.activeNav === 'stats' ? statsMarkup() : state.activeNav === 'logs' ? logsMarkup() : aboutMarkup()}
-      <footer class="footer-note"><span>${icon('shield', 13)} ${escapeHtml(t('footer.proxy'))}</span><span>${escapeHtml(t('footer.direct'))}</span></footer>
+      <header class="topbar"><div class="topbar-title"><h1>${escapeHtml(t(`nav.${state.activeNav}`))}</h1><span class="topbar-sub">${escapeHtml(capabilities.native ? t('app.windowsProxy') : t('app.preview'))}</span></div><div class="topbar-actions">${state.connection === 'connected' ? `<span class="session-chip">${icon('clock', 13)}<span data-duration>${formatDuration()}</span></span>` : ''}<button class="icon-button" data-action="refresh" aria-label="${escapeHtml(t('app.refresh'))}" title="${escapeHtml(t('app.refresh'))}" ${state.importing ? 'disabled' : ''}>${icon('refresh', 15)}</button></div></header>
+      <div id="page-host" class="page-host"></div>
     </main>
-  </div>${state.modal === 'add' ? modalMarkup() : state.modal === 'result' ? resultMarkup() : state.modal === 'delete-sub' ? deleteMarkup() : ''}${toastMarkup()}`;
-  // A tick that changes nothing must not rebuild the DOM: it would drop focus,
-  // scroll position and text selection for no reason.
-  if (markup === lastMarkup && !openingModal && !closingModal) { modalPreviouslyOpen = Boolean(state.modal); return; }
-  lastMarkup = markup;
-  app.innerHTML = markup;
+  </div><div id="modal-host"></div><div id="toast-host"></div>`;
+}
+
+function dockMarkup(node) {
+  if (!node || !['home', 'servers'].includes(state.activeNav)) return '';
+  const [status, , statusClass] = statusInfo();
+  return `<div class="mobile-dock" role="region" aria-label="${escapeHtml(t('control.selected'))}">
+    ${nodeFlag(node, 'flag')}
+    <div class="dock-copy"><strong>${escapeHtml(displayName(node))}</strong><span class="dock-sub">${escapeHtml(node.outbound?.type?.toUpperCase() || '')} · ${escapeHtml(pingText(node))} · <span class="dock-status ${statusClass}">${escapeHtml(status)}</span></span></div>
+    <button class="button primary" data-action="toggle" ${toggleDisabled(node) ? 'disabled' : ''}>${escapeHtml(actionLabel())}</button>
+  </div>`;
+}
+
+function pageMarkup(node) {
+  return `${renderNotice()}${state.activeNav === 'home' ? homeMarkup(node) : state.activeNav === 'servers' ? serversMarkup(node) : state.activeNav === 'settings' ? settingsMarkup() : state.activeNav === 'stats' ? statsMarkup() : state.activeNav === 'logs' ? logsMarkup() : aboutMarkup()}${dockMarkup(node)}<footer class="footer-note"><span>${icon('shield', 13)} ${escapeHtml(t('footer.proxy'))}</span><span>${escapeHtml(t('footer.direct'))}</span></footer>`;
+}
+
+function modalMarkupForState() {
+  return state.modal === 'add' ? modalMarkup() : state.modal === 'result' ? resultMarkup() : state.modal === 'delete-sub' ? deleteMarkup() : '';
+}
+
+// Inner scrollers survive a page swap: their offset is captured by key and put
+// back before the frame is painted. The main column keeps its own offset
+// because only its children are replaced.
+function captureScroll() {
+  const offsets = new Map();
+  for (const element of document.querySelectorAll('[data-scroll-key]')) offsets.set(element.dataset.scrollKey, element.scrollTop);
+  return offsets;
+}
+function restoreScroll(offsets) {
+  if (!offsets.size) return;
+  for (const element of document.querySelectorAll('[data-scroll-key]')) {
+    const value = offsets.get(element.dataset.scrollKey);
+    if (typeof value === 'number' && element.scrollTop !== value) element.scrollTop = value;
+  }
+}
+
+function render() {
+  const previous = document.activeElement;
+  const focusKey = previous?.getAttribute?.('data-focus-key') || previous?.id || null;
+  const oldSelection = previous && typeof previous.selectionStart === 'number' ? [previous.selectionStart, previous.selectionEnd] : null;
+  const openingModal = Boolean(state.modal) && !modalPreviouslyOpen;
+  const closingModal = !state.modal && modalPreviouslyOpen;
+  const node = selectedNode();
+  const shell = `${state.connection}|${state.activeNav}|${state.language}|${state.importing}|${VERSION}|${capabilities.native}`;
+  let changed = false;
+  if (shell !== shellSignature) {
+    shellSignature = shell;
+    app.innerHTML = shellMarkup();
+    lastPageMarkup = ''; lastModalMarkup = ''; lastToastMarkup = '';
+    changed = true;
+  }
+  const page = pageMarkup(node);
+  if (page !== lastPageMarkup) {
+    const offsets = captureScroll();
+    const host = document.querySelector('#page-host');
+    if (host) { host.innerHTML = page; lastPageMarkup = page; restoreScroll(offsets); changed = true; }
+  }
+  const modal = modalMarkupForState();
+  if (modal !== lastModalMarkup) {
+    const host = document.querySelector('#modal-host');
+    if (host) { host.innerHTML = modal; lastModalMarkup = modal; changed = true; }
+  }
+  const toast = toastMarkup();
+  if (toast !== lastToastMarkup) {
+    const host = document.querySelector('#toast-host');
+    if (host) { host.innerHTML = toast; lastToastMarkup = toast; changed = true; }
+  }
+  if (!changed && !openingModal && !closingModal) { modalPreviouslyOpen = Boolean(state.modal); return; }
   bindEvents();
   if (openingModal) document.querySelector('#import-input')?.focus();
   else if (closingModal) (document.querySelector('[data-action="add"]') || document.querySelector('[data-action="refresh"]'))?.focus();
