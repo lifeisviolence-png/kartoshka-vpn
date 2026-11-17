@@ -1,0 +1,11 @@
+IP geolocation data: DB-IP Lite (https://db-ip.com)
+Copyright (c) 2026 DB-IP.com
+Licensed under the Creative Commons Attribution 4.0 International License.
+https://creativecommons.org/licenses/by/4.0/
+
+The bundled file country-ipv4.bin.gz is a derived, compressed representation of
+DB-IP country lite data (IPv4 ranges only). It is used solely to show a country
+flag for a server address and is never sent anywhere.
+
+Regenerate with:
+  node scripts/build-country-db.mjs <dbip-country-lite.csv[.gz]> src-tauri/resources/country-ipv4.bin.gz

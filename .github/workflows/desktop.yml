@@ -66,8 +66,12 @@ jobs:
           }
           if (-not (Select-String -Quiet -Path src-tauri/binaries/licenses/Xray-MPL-2.0.txt -Pattern 'Mozilla Public License Version 2.0')) { throw 'Missing Xray MPL-2.0 license' }
           Write-Output "Xray archive SHA256 $env:XRAY_SHA256 verified; wintun.dll is not shipped"
-      - name: Generate desktop icons
-        run: pnpm tauri icon src-tauri/icons/potato-mark.svg
+      - name: Verify committed desktop icons
+        shell: pwsh
+        run: |
+          foreach ($file in 'icon.ico','32x32.png','128x128.png','128x128@2x.png') {
+            if (-not (Test-Path "src-tauri/icons/$file")) { throw "Missing src-tauri/icons/$file" }
+          }
       - name: Build frontend for Rust test harness
         run: pnpm run build
       - name: Build executable for watchdog process tests
@@ -86,6 +90,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "JavaScript Xray tests failed ($LASTEXITCODE)" }
           node --test tests/frontend-regressions.test.js
           if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed ($LASTEXITCODE)" }
+          node --test tests/countries.test.js tests/state-model.test.js tests/i18n.test.js tests/version.test.js
+          if ($LASTEXITCODE -ne 0) { throw "Interface, state and version tests failed ($LASTEXITCODE)" }
       - name: Real Windows registry, watchdog crash and loopback Xray smoke
         shell: pwsh
         env:
@@ -97,10 +103,20 @@ jobs:
           $env:KARTOVPN_WATCHDOG_TEST_EXE = (Resolve-Path "src-tauri/target/$env:TARGET/debug/kartoshka-vpn.exe").Path
           $env:XRAY_TEST_BINARY = (Resolve-Path "src-tauri/binaries/xray-$env:TARGET.exe").Path
           $env:XRAY_TEST_ASSETS = (Resolve-Path 'src-tauri/binaries/xray-assets').Path
-          cargo test --manifest-path src-tauri/Cargo.toml --target $env:TARGET --no-run
+          $build = cargo test --manifest-path src-tauri/Cargo.toml --target $env:TARGET --no-run 2>&1
+          $build | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { throw "Windows test compilation failed ($LASTEXITCODE)" }
-          $testExe = Get-ChildItem "src-tauri/target/$env:TARGET/debug/deps/kartoshka_vpn-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          # Cargo prints where it put the harness; the layout differs between runners,
+          # so trust that path first and fall back to a search.
+          $testExe = $null
+          foreach ($line in $build) {
+            if ("$line" -match 'Executable unittests .*\((.+\.exe)\)') { $testExe = Get-Item $Matches[1]; break }
+          }
+          if (-not $testExe) {
+            $testExe = Get-ChildItem -Path "src-tauri/target/$env:TARGET/debug" -Recurse -Filter 'kartoshka_vpn-*.exe' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          }
           if (-not $testExe) { throw 'Windows test harness was not found' }
+          Write-Output "Test harness: $($testExe.FullName)"
           # The GitHub runner's Job can prohibit CREATE_BREAKAWAY_FROM_JOB. A
           # same-user interactive scheduled task is an independent launch path,
           # not a relaxation of the production watchdog's IsProcessInJob check.
@@ -180,7 +196,7 @@ jobs:
           $dest = Join-Path $env:RUNNER_TEMP 'kartoshka-installed'
           $result = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$dest") -Wait -PassThru
           if ($result.ExitCode -ne 0) { throw "NSIS installation failed: $($result.ExitCode)" }
-          foreach ($file in @('xray.exe','xray-assets/geoip.dat','xray-assets/geosite.dat','licenses/Xray-MPL-2.0.txt','licenses/Xray-rules-LICENSE.txt','licenses/Xray-rules-LICENSE-GeoSite.txt','licenses/Xray-rules-LICENSE-GeoSite-inherit.txt')) {
+          foreach ($file in @('xray.exe','xray-assets/geoip.dat','xray-assets/geosite.dat','licenses/Xray-MPL-2.0.txt','licenses/Xray-rules-LICENSE.txt','licenses/Xray-rules-LICENSE-GeoSite.txt','licenses/Xray-rules-LICENSE-GeoSite-inherit.txt','licenses/DB-IP-LICENSE.txt','licenses/flag-icons-LICENSE.txt','licenses/Lucide-LICENSE.txt','country-ipv4.bin.gz')) {
             if (-not (Test-Path (Join-Path $dest $file))) { throw "Installed file missing: $file" }
           }
           $env:XRAY_LOCATION_ASSET = Join-Path $dest 'xray-assets'

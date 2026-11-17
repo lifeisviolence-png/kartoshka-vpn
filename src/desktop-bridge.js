@@ -6,9 +6,9 @@ const isDesktop = Boolean(window.__TAURI_INTERNALS__);
 const directScheme = /^(vless|vmess|trojan|ss|hysteria2):\/\//i;
 
 export const desktopBridge = {
-  async connect({ config }) {
+  async connect({ config, debug = false }) {
     if (!isDesktop) return { ok: false, demo: true, error: t('bridge.previewProxy') };
-    await invoke('start_proxy', { configJson: JSON.stringify(config) });
+    await invoke('start_proxy', { configJson: JSON.stringify(config), debug: Boolean(debug) });
     return { ok: true, native: true };
   },
   async disconnect() {
@@ -30,6 +30,16 @@ export const desktopBridge = {
   async pingNode(node) {
     if (!isDesktop || !node?.outbound?.server) return null;
     return invoke('test_latency', { host: node.outbound.server, port: Number(node.outbound.server_port || 443) });
+  },
+  // One request through a temporary core instance; used for UDP protocols where
+  // a TCP handshake proves nothing.
+  async probeNodeLatency(config) {
+    if (!isDesktop) return null;
+    return invoke('probe_node_latency', { configJson: JSON.stringify(config) });
+  },
+  async lookupCountries(hosts) {
+    if (!isDesktop || !Array.isArray(hosts) || !hosts.length) return [];
+    return invoke('lookup_countries', { hosts: hosts.map(String) });
   },
   async proxyLatency() {
     if (!isDesktop) return null;
