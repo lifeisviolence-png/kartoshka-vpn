@@ -20,7 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2019, windows-2022, windows-2025]
+        # windows-2019 hosted runners are retired; 2022 and 2025 are the supported images.
+        os: [windows-2022, windows-2025]
     steps:
       - name: Show image version
         shell: pwsh
