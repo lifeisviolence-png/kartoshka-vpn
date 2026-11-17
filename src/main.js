@@ -316,11 +316,21 @@ function modalMarkupForState() {
 // because only its children are replaced.
 function captureScroll() {
   const offsets = new Map();
+  // The main column is the page scroller: replacing its children can clamp the
+  // offset if the new content is momentarily shorter, so it is saved too.
+  const main = document.querySelector('.main');
+  if (main) offsets.set('__main', main.scrollTop);
   for (const element of document.querySelectorAll('[data-scroll-key]')) offsets.set(element.dataset.scrollKey, element.scrollTop);
   return offsets;
 }
 function restoreScroll(offsets) {
   if (!offsets.size) return;
+  const main = document.querySelector('.main');
+  const saved = offsets.get('__main');
+  if (main && typeof saved === 'number') {
+    const max = Math.max(0, main.scrollHeight - main.clientHeight);
+    main.scrollTop = Math.min(saved, max);
+  }
   for (const element of document.querySelectorAll('[data-scroll-key]')) {
     const value = offsets.get(element.dataset.scrollKey);
     if (typeof value === 'number' && element.scrollTop !== value) element.scrollTop = value;
