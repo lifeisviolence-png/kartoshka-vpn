@@ -162,6 +162,10 @@ export function toXrayOutbound(node) {
     if (stream.security !== 'tls') failCode('config.hy2Tls');
     stream.network = 'hysteria';
     stream.hysteriaSettings = { version: 2, auth: typeof o.password === 'string' ? o.password : '' };
+    // Bandwidth and congestion are optional: absent means the core default.
+    if (typeof o.up === 'string' && o.up) stream.hysteriaSettings.up = o.up;
+    if (typeof o.down === 'string' && o.down) stream.hysteriaSettings.down = o.down;
+    if (typeof o.congestion === 'string' && o.congestion) stream.hysteriaSettings.congestion = o.congestion;
     if (o.obfs) {
       if (o.obfs.type !== 'salamander' || !o.obfs.password) failCode('config.hy2Obfs');
       stream.finalmask = { udp: [{ type: 'salamander', settings: { password: o.obfs.password } }] };

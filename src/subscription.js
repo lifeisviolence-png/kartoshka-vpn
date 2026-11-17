@@ -43,11 +43,41 @@ const IGNORED_KEYS = ['ed', 'eh', 'headerType', 'remarks', 'remark'];
 // `support-*` flags describe what the client can do (for example
 // support-x25519mlkem768); they are not server parameters and are not warnings.
 const isClientHint = key => String(key).toLowerCase().startsWith('support-');
+const XHTTP_QUERY_KEYS = {
+  x_padding_bytes: 'xPaddingBytes', x_padding_key: 'xPaddingKey', x_padding_header: 'xPaddingHeader',
+  x_padding_placement: 'xPaddingPlacement', x_padding_method: 'xPaddingMethod', x_padding_obfs_mode: 'xPaddingObfsMode',
+  uplink_http_method: 'uplinkHTTPMethod', session_id_placement: 'sessionIDPlacement', session_id_key: 'sessionIDKey',
+  session_id_table: 'sessionIDTable', session_id_length: 'sessionIDLength', seq_placement: 'seqPlacement', seq_key: 'seqKey',
+  uplink_data_placement: 'uplinkDataPlacement', uplink_data_key: 'uplinkDataKey', uplink_chunk_size: 'uplinkChunkSize',
+  sc_max_each_post_bytes: 'scMaxEachPostBytes', sc_min_posts_interval_ms: 'scMinPostsIntervalMs',
+  sc_stream_up_server_secs: 'scStreamUpServerSecs', sc_max_buffered_posts: 'scMaxBufferedPosts',
+  server_max_header_bytes: 'serverMaxHeaderBytes', no_grpc_header: 'noGRPCHeader', no_sse_header: 'noSSEHeader',
+  xmux: 'xmux', download_settings: 'downloadSettings', h2_params: 'h2Params'
+};
+const XHTTP_CAMEL_KEYS = new Set(Object.values(XHTTP_QUERY_KEYS));
+const isXhttpKey = key => Object.hasOwn(XHTTP_QUERY_KEYS, key) || XHTTP_CAMEL_KEYS.has(key);
+// Booleans and JSON objects are decoded; numbers and ranges like "100-1000" stay
+// strings because the core accepts both spellings.
+function coerceExtra(value) {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  const text = String(value).trim();
+  if (text.startsWith('{') || text.startsWith('[')) { try { return JSON.parse(text); } catch { return value; } }
+  return value;
+}
+function xhttpQueryExtra(p) {
+  const extras = {};
+  for (const [key, value] of p.entries()) {
+    if (Object.hasOwn(XHTTP_QUERY_KEYS, key)) extras[XHTTP_QUERY_KEYS[key]] = coerceExtra(value);
+    else if (XHTTP_CAMEL_KEYS.has(key)) extras[key] = coerceExtra(value);
+  }
+  return extras;
+}
 function query(url, allowed, warnings = []) {
   const params = url.searchParams;
   for (const key of params.keys()) {
     if (params.getAll(key).length > 1 && !IGNORED_KEYS.includes(key)) issue('sub.duplicateParam', { key });
-    if (allowed.includes(key) || IGNORED_KEYS.includes(key) || isClientHint(key)) continue;
+    if (allowed.includes(key) || IGNORED_KEYS.includes(key) || isClientHint(key) || isXhttpKey(key)) continue;
     warnings.push(new ParseIssue('sub.unknownParam', { key }));
   }
   return params;
@@ -94,10 +124,14 @@ function transport(p) {
   const path = get(p, 'path'), host = get(p, 'host'), mode = get(p, 'mode'), extra = get(p, 'extra'), service = get(p, 'serviceName', 'service'), authority = get(p, 'authority');
   const allow = condition => { if (!condition) issue('sub.transportMismatch'); };
   if (['tcp', 'raw'].includes(type)) { allow(!(path || host || mode || extra || service || authority)); return undefined; }
+  if (type !== 'xhttp' && type !== 'splithttp') { for (const key of p.keys()) if (isXhttpKey(key)) issue('sub.unknownParam'); }
   if (type === 'xhttp' || type === 'splithttp') {
     allow(!(service || authority));
     let extras;
     if (extra !== undefined && extra !== '') { try { extras = JSON.parse(extra); } catch { issue('sub.badXhttpExtra'); } }
+    const fromQuery = xhttpQueryExtra(p);
+    // extra=JSON wins over the flat query keys when both are present.
+    if (Object.keys(fromQuery).length) extras = { ...fromQuery, ...(extras || {}) };
     return { type: 'xhttp', ...(path !== undefined && path !== '' ? { path } : {}), ...(host !== undefined && host !== '' ? { host } : {}), ...(mode !== undefined && mode !== '' ? { mode } : {}), ...(extras !== undefined ? { extra: extras } : {}) };
   }
   if (type === 'ws' || type === 'websocket') { allow(!(extra || service || authority)); return { type: 'ws', path: path || '/', ...(host ? { headers: { Host: host } } : {}) }; }
@@ -113,11 +147,12 @@ function transport(p) {
 }
 function uriNode(raw, index, protocol, warnings) {
   const url = parseUrl(raw);
-  const p = query(url, [...TLS_KEYS, ...TRANSPORT_KEYS, ...(protocol === 'vless' ? ['flow', 'encryption', 'packetEncoding'] : [])], warnings);
+  const p = query(url, [...TLS_KEYS, ...TRANSPORT_KEYS, ...(protocol === 'vless' ? ['flow', 'encryption', 'packetEncoding'] : []), ...(protocol === 'hysteria2' ? ['up', 'down', 'congestion'] : [])], warnings);
   if (url.password) issue('sub.unexpectedPassword');
   if (url.pathname && url.pathname !== '/') issue('sub.unexpectedPath');
   const name = cleanName(decoded(url.hash.slice(1)), `${protocol === 'vless' ? 'VLESS' : 'Trojan'} ${index + 1}`);
-  const o = { type: protocol, server: hostOf(url), server_port: Number(url.port || 443), tls: commonTls(url, p, protocol === 'trojan' ? 'tls' : 'none'), transport: transport(p) };
+  const hy2 = protocol === 'hysteria2' ? { up: p.get('up') || undefined, down: p.get('down') || undefined, congestion: p.get('congestion') || undefined } : {};
+  const o = { type: protocol, ...hy2, server: hostOf(url), server_port: Number(url.port || 443), tls: commonTls(url, p, protocol === 'trojan' ? 'tls' : 'none'), transport: transport(p) };
   if (protocol === 'vless') { o.uuid = decoded(url.username); o.flow = get(p, 'flow'); o.encryption = get(p, 'encryption') || 'none'; o.packet_encoding = get(p, 'packetEncoding'); }
   else o.password = decoded(url.username);
   return makeNode(name, o, index, protocol === 'vless' ? 'VLESS' : 'Trojan');

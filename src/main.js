@@ -88,6 +88,13 @@ if (loaded.migrated) {
 }
 
 const app = document.querySelector('#app');
+// Settings that need no restart are saved straight from the control.
+app.addEventListener?.('change', (event) => {
+  if (event.target?.id !== 'failover-mode') return;
+  state.settings = { ...(state.settings || {}), failover: event.target.value };
+  try { if (typeof save === 'function') save(); } catch { /* сохранение не критично для перерисовки */ }
+  render();
+});
 let exitSequence = 0;
 let operationSequence = 0;
 let sessionSequence = 0;
@@ -567,6 +574,7 @@ function settingsMarkup() {
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.hint`))}</small></div><select id="dns-mode" aria-label="${escapeHtml(t('settings.dns'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${dnsModeIds.map((id) => `<option value="${id}" ${id === dnsMode ? 'selected' : ''}>${escapeHtml(t(`settings.dnsMode.${id}`))}</option>`).join('')}</select></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.failover'))}</strong></div><select id="failover-mode" aria-label="${escapeHtml(t('settings.failover'))}">${['country', 'any', 'never'].map((id) => `<option value="${id}" ${id === (state.settings?.failover || 'country') ? 'selected' : ''}>${escapeHtml(t(`settings.failoverMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
 }
@@ -1210,13 +1218,18 @@ async function handleHealth(kind, payload) {
     return;
   }
   if (state.connection !== 'connected' || Date.now() - lastHealthSwitch < 60000) return;
-  // The core could not restart the tunnel: try the next node once a minute so a
-  // dead server does not leave the app connected to nothing.
+  // The core could not restart the tunnel. Switching changes the exit country and
+  // the external IP, so it is a setting: same country by default.
+  const failover = state.settings?.failover === 'any' || state.settings?.failover === 'never' ? state.settings.failover : 'country';
+  if (failover === 'never') { state.proxyCheckFailed = true; setMessage('notice.healthNoSwitch', { error: errorText(payload) }); render(); return; }
   const candidates = state.servers.filter((node) => node.id !== state.activeNode?.id && !unsupportedReason(node));
-  const next = candidates.find((node) => node.country && node.country === state.activeNode?.country) || candidates[0];
+  const next = failover === 'country' ? candidates.find((node) => node.country && node.country === state.activeNode?.country) : candidates[0];
   if (!next) { state.proxyCheckFailed = true; setMessage('notice.healthFailed', { error: errorText(payload) }); render(); return; }
   lastHealthSwitch = Date.now();
-  appendLocalLog(t('notice.healthSwitch', { name: next.name || t('servers.serverFallback') }));
+  const label = next.name || t('servers.serverFallback');
+  const country = next.country ? ` (${next.country})` : '';
+  appendLocalLog(t('notice.healthSwitch', { name: label }));
+  setMessage('notice.failoverSwitched', { name: label, country });
   await startSelected(next);
 }
 function handleProxyExit(message) {
