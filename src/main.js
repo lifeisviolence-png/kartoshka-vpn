@@ -10,6 +10,7 @@ import { migrateState, snapshot, subscriptionIdFor, subscriptionNameFor, mergeSu
 
 const capabilities = desktopBridge.getCapabilities();
 const routeModeIds = ['all', 'auto', 'split'];
+const dnsModeIds = ['system', 'builtin'];
 const directScheme = /^(vless|vmess|trojan|ss|shadowsocks|hysteria2|hy2):\/\//i;
 const storageKey = 'kartoshka.state.v2';
 const legacyKey = 'kartoshka.state.v1';
@@ -68,6 +69,7 @@ const state = {
   notice: null,
   toast: null,
   logs: [],
+  transferActive: false,
   search: '',
   sort: 'country',
   collapsed: [],
@@ -267,15 +269,16 @@ function toastMarkup() {
   if (!state.toast) return '';
   return `<div class="toast" role="status"><span>${escapeHtml(state.toast.text)}</span>${state.toast.action ? `<button class="toast-action" data-action="toast-action">${escapeHtml(state.toast.actionLabel)}</button>` : ''}<button class="icon-button" data-action="dismiss-toast" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 13)}</button></div>`;
 }
-function render() {
-  const previous = document.activeElement;
-  const focusKey = previous?.getAttribute?.('data-focus-key') || previous?.id || null;
-  const oldSelection = previous && typeof previous.selectionStart === 'number' ? [previous.selectionStart, previous.selectionEnd] : null;
-  const openingModal = Boolean(state.modal) && !modalPreviouslyOpen;
-  const closingModal = !state.modal && modalPreviouslyOpen;
-  const node = selectedNode();
-  const title = t(`nav.${state.activeNav}`);
-  app.innerHTML = `<div class="shell">
+let shellSignature = '';
+// Set once the first real render proves that the DOM is a tree and not the
+// string-only stub used by the regression harness.
+let incremental = true;
+let lastPageMarkup = '';
+let lastModalMarkup = '';
+let lastToastMarkup = '';
+
+function shellMarkup() {
+  return `<div class="shell">
     <aside class="sidebar">
       <div class="brand"><img class="brand-mark" src="/potato-mark.png" alt=""/><div class="brand-copy"><strong>Kartoshka<span>VPN</span></strong><small>${escapeHtml(t('app.tagline'))}</small></div></div>
       <nav class="nav" aria-label="${escapeHtml(t('app.navigation'))}">
@@ -284,12 +287,92 @@ function render() {
       <div class="sidebar-bottom">${navItem('about', 'info', t('nav.about'))}<div class="sidebar-foot"><span class="foot-dot ${state.connection === 'connected' ? 'on' : ''}"></span><span>${escapeHtml(capabilities.native ? t('app.windowsXray') : t('app.previewMode'))}</span></div><span class="sidebar-version">v${escapeHtml(VERSION)}</span></div>
     </aside>
     <main class="main">
-      <header class="topbar"><div class="topbar-title"><h1>${escapeHtml(title)}</h1><span class="topbar-sub">${escapeHtml(capabilities.native ? t('app.windowsProxy') : t('app.preview'))}</span></div><div class="topbar-actions">${state.connection === 'connected' ? `<span class="session-chip">${icon('clock', 13)}<span data-duration>${formatDuration()}</span></span>` : ''}<button class="icon-button" data-action="refresh" aria-label="${escapeHtml(t('app.refresh'))}" title="${escapeHtml(t('app.refresh'))}" ${state.importing ? 'disabled' : ''}>${icon('refresh', 15)}</button></div></header>
-      ${renderNotice()}
-      ${state.activeNav === 'home' ? homeMarkup(node) : state.activeNav === 'servers' ? serversMarkup(node) : state.activeNav === 'settings' ? settingsMarkup() : state.activeNav === 'stats' ? statsMarkup() : state.activeNav === 'logs' ? logsMarkup() : aboutMarkup()}
-      <footer class="footer-note"><span>${icon('shield', 13)} ${escapeHtml(t('footer.proxy'))}</span><span>${escapeHtml(t('footer.direct'))}</span></footer>
+      <header class="topbar"><div class="topbar-title"><h1>${escapeHtml(t(`nav.${state.activeNav}`))}</h1><span class="topbar-sub">${escapeHtml(capabilities.native ? t('app.windowsProxy') : t('app.preview'))}</span></div><div class="topbar-actions">${state.connection === 'connected' ? `<span class="session-chip">${icon('clock', 13)}<span data-duration>${formatDuration()}</span></span>` : ''}<button class="icon-button" data-action="refresh" aria-label="${escapeHtml(t('app.refresh'))}" title="${escapeHtml(t('app.refresh'))}" ${state.importing ? 'disabled' : ''}>${icon('refresh', 15)}</button></div></header>
+      <div id="page-host" class="page-host"></div>
     </main>
-  </div>${state.modal === 'add' ? modalMarkup() : state.modal === 'result' ? resultMarkup() : state.modal === 'delete-sub' ? deleteMarkup() : ''}${toastMarkup()}`;
+  </div><div id="modal-host"></div><div id="toast-host"></div>`;
+}
+
+function dockMarkup(node) {
+  if (!node || !['home', 'servers'].includes(state.activeNav)) return '';
+  const [status, , statusClass] = statusInfo();
+  return `<div class="mobile-dock" role="region" aria-label="${escapeHtml(t('control.selected'))}">
+    ${nodeFlag(node, 'flag')}
+    <div class="dock-copy"><strong>${escapeHtml(displayName(node))}</strong><span class="dock-sub">${escapeHtml(node.outbound?.type?.toUpperCase() || '')} · ${escapeHtml(pingText(node))} · <span class="dock-status ${statusClass}">${escapeHtml(status)}</span></span></div>
+    <button class="button primary" data-action="toggle" ${toggleDisabled(node) ? 'disabled' : ''}>${escapeHtml(actionLabel())}</button>
+  </div>`;
+}
+
+function pageMarkup(node) {
+  return `${renderNotice()}${state.activeNav === 'home' ? homeMarkup(node) : state.activeNav === 'servers' ? serversMarkup(node) : state.activeNav === 'settings' ? settingsMarkup() : state.activeNav === 'stats' ? statsMarkup() : state.activeNav === 'logs' ? logsMarkup() : aboutMarkup()}${dockMarkup(node)}<footer class="footer-note"><span>${icon('shield', 13)} ${escapeHtml(t('footer.proxy'))}</span><span>${escapeHtml(t('footer.direct'))}</span></footer>`;
+}
+
+function modalMarkupForState() {
+  return state.modal === 'add' ? modalMarkup() : state.modal === 'result' ? resultMarkup() : state.modal === 'delete-sub' ? deleteMarkup() : '';
+}
+
+// Inner scrollers survive a page swap: their offset is captured by key and put
+// back before the frame is painted. The main column keeps its own offset
+// because only its children are replaced.
+function captureScroll() {
+  const offsets = new Map();
+  for (const element of document.querySelectorAll('[data-scroll-key]')) offsets.set(element.dataset.scrollKey, element.scrollTop);
+  return offsets;
+}
+function restoreScroll(offsets) {
+  if (!offsets.size) return;
+  for (const element of document.querySelectorAll('[data-scroll-key]')) {
+    const value = offsets.get(element.dataset.scrollKey);
+    if (typeof value === 'number' && element.scrollTop !== value) element.scrollTop = value;
+  }
+}
+
+// The regression harness builds a minimal DOM that stores innerHTML as a string
+// without parsing it. There is no #page-host there, so the whole view is written
+// in one go; the real WebView always takes the incremental path below.
+function renderWhole(node) {
+  shellSignature = '';
+  lastPageMarkup = ''; lastModalMarkup = ''; lastToastMarkup = '';
+  app.innerHTML = `${shellMarkup().replace('<div id="page-host" class="page-host"></div>', `<div id="page-host" class="page-host">${pageMarkup(node)}</div>`)}${modalMarkupForState()}${toastMarkup()}`;
+  incremental = (document.querySelector('#page-host')?.childElementCount || 0) > 0;
+  bindEvents();
+}
+
+function render() {
+  const previous = document.activeElement;
+  const focusKey = previous?.getAttribute?.('data-focus-key') || previous?.id || null;
+  const oldSelection = previous && typeof previous.selectionStart === 'number' ? [previous.selectionStart, previous.selectionEnd] : null;
+  const openingModal = Boolean(state.modal) && !modalPreviouslyOpen;
+  const closingModal = !state.modal && modalPreviouslyOpen;
+  const node = selectedNode();
+  let mount = document.querySelector('#page-host');
+  if (!incremental || !mount || mount.nodeType !== 1) { renderWhole(node); modalPreviouslyOpen = Boolean(state.modal); return; }
+  const shell = `${state.connection}|${state.activeNav}|${state.language}|${state.importing}|${VERSION}|${capabilities.native}`;
+  let changed = false;
+  if (shell !== shellSignature) {
+    shellSignature = shell;
+    app.innerHTML = shellMarkup();
+    // The shell rebuild replaces the host element, so the old reference is detached.
+    mount = document.querySelector('#page-host');
+    lastPageMarkup = ''; lastModalMarkup = ''; lastToastMarkup = '';
+    changed = true;
+  }
+  const page = pageMarkup(node);
+  if (page !== lastPageMarkup) {
+    const offsets = captureScroll();
+    mount.innerHTML = page; lastPageMarkup = page; restoreScroll(offsets); changed = true;
+  }
+  const modal = modalMarkupForState();
+  if (modal !== lastModalMarkup) {
+    const host = document.querySelector('#modal-host');
+    if (host) { host.innerHTML = modal; lastModalMarkup = modal; changed = true; }
+  }
+  const toast = toastMarkup();
+  if (toast !== lastToastMarkup) {
+    const host = document.querySelector('#toast-host');
+    if (host) { host.innerHTML = toast; lastToastMarkup = toast; changed = true; }
+  }
+  if (!changed && !openingModal && !closingModal) { modalPreviouslyOpen = Boolean(state.modal); return; }
   bindEvents();
   if (openingModal) document.querySelector('#import-input')?.focus();
   else if (closingModal) (document.querySelector('[data-action="add"]') || document.querySelector('[data-action="refresh"]'))?.focus();
@@ -348,6 +431,7 @@ function homeMarkup(selected) {
         <div class="quick-grid">
           <button class="quick" data-nav="servers">${icon('server', 16)}<span>${escapeHtml(t('home.allServers'))}</span><strong>${state.servers.length}</strong></button>
           <button class="quick" data-nav="settings">${icon('settings', 16)}<span>${escapeHtml(t('home.route'))}</span><strong>${escapeHtml(t(`route.short.${state.routeMode}`))}</strong></button>
+          <button class="quick" data-action="speed-test" ${state.connection !== 'connected' || state.speedRunning ? 'disabled' : ''}>${icon('activity', 16)}<span>${escapeHtml(t('speed.title'))}</span><strong>${state.speedRunning ? '…' : (state.speed ? `${state.speed.down} ${t('speed.unit')}` : '—')}</strong></button>
           <button class="quick" data-action="ping-all" ${state.pingJob ? 'disabled' : ''}>${icon('activity', 16)}<span>${escapeHtml(t('home.checkPing'))}</span><strong>${state.pingJob ? `${state.pingJob.done}/${state.pingJob.total}` : '—'}</strong></button>
           <button class="quick" data-nav="logs">${icon('logs', 16)}<span>${escapeHtml(t('home.logs'))}</span><strong>${state.logs.length}</strong></button>
         </div>
@@ -449,6 +533,8 @@ function serversMarkup(node) {
 }
 
 function settingsMarkup() {
+  const nodeMode = state.settings?.nodeMode === 'auto' ? 'auto' : 'single';
+  const dnsMode = dnsModeIds.includes(state.settings?.dns) ? state.settings.dns : 'system';
   const source = state.routing?.profile ? t('settings.routeSourceSubscription') : t('settings.routeSourceBuiltin');
   const rejected = state.routing?.unsupported?.length || 0;
   const routeNote = `${escapeHtml(t('settings.routeSource', { source }))}${rejected ? `<br/><span class="warn-text">${escapeHtml(t('settings.routeUnsupported', { count: rejected }))}</span>` : ''}${state.routing?.dns ? `<br/><span class="muted">${escapeHtml(t('settings.routeDnsIgnored'))}</span>` : ''}`;
@@ -456,6 +542,11 @@ function settingsMarkup() {
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.general'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.language'))}</strong><small>${escapeHtml(t('settings.languageHint'))}</small></div><select id="language" aria-label="${escapeHtml(t('settings.language'))}"><option value="ru" ${state.language === 'ru' ? 'selected' : ''}>${escapeHtml(t('settings.languageRu'))}</option><option value="en" ${state.language === 'en' ? 'selected' : ''}>${escapeHtml(t('settings.languageEn'))}</option></select></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.routeMode'))}</strong><small>${escapeHtml(routeDescription(state.routeMode))}${escapeHtml(state.connection === 'connected' ? t('settings.routeHintConnected') : '')}<br/>${routeNote}</small></div><select id="route-mode" aria-label="${escapeHtml(t('settings.routeMode'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${routeModeIds.map((id) => `<option value="${id}" ${id === state.routeMode ? 'selected' : ''}>${escapeHtml(routeTitle(id))}</option>`).join('')}</select></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.nodeMode'))}</strong><small>${escapeHtml(t(`settings.nodeMode.${nodeMode}.hint`))}</small></div><select id="node-mode" aria-label="${escapeHtml(t('settings.nodeMode'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}><option value="single" ${nodeMode === 'single' ? 'selected' : ''}>${escapeHtml(t('settings.nodeMode.single'))}</option><option value="auto" ${nodeMode === 'auto' ? 'selected' : ''}>${escapeHtml(t('settings.nodeMode.auto'))}</option></select></div>
+      <div class="setting"><div><strong>${escapeHtml(t('speed.url'))}</strong><small>${escapeHtml(t('speed.urlHint'))}</small></div><input id="speed-url" type="url" class="text-input" placeholder="https://" value="${escapeHtml(state.settings?.speedUrl || '')}"/></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.perf.sniffing'))}</strong><small>${escapeHtml(t('settings.perf.sniffingHint'))}</small></div><label class="switch"><input type="checkbox" id="perf-sniffing" ${state.settings?.perf?.sniffing ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.perf.preferIPv4'))}</strong><small>${escapeHtml(t('settings.perf.preferIPv4Hint'))}</small></div><label class="switch"><input type="checkbox" id="perf-ipv4" ${state.settings?.perf?.preferIPv4 ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.perf.tcpFastOpen'))}</strong><small>${escapeHtml(t('settings.perf.tcpFastOpenHint'))}</small></div><label class="switch"><input type="checkbox" id="perf-tfo" ${state.settings?.perf?.tcpFastOpen ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.debug'))}</strong><small>${escapeHtml(t('settings.debugHint'))}</small></div><label class="switch"><input type="checkbox" id="debug-mode" ${state.settings?.debug ? 'checked' : ''}/><span></span></label></div>
     </div>
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.data'))}</span></div>
@@ -465,7 +556,7 @@ function settingsMarkup() {
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.unavailableTitle'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
-      <div class="setting muted"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t('settings.dnsHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.hint`))}</small></div><select id="dns-mode" aria-label="${escapeHtml(t('settings.dns'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${dnsModeIds.map((id) => `<option value="${id}" ${id === dnsMode ? 'selected' : ''}>${escapeHtml(t(`settings.dnsMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
 }
@@ -481,6 +572,8 @@ function statsMarkup() {
     <div class="stat-card"><span>${escapeHtml(t('stats.subscriptions'))}</span><strong>${state.subscriptions.length}</strong></div>
     <div class="stat-card"><span>${escapeHtml(t('stats.used'))}</span><strong>${totalUsed ? formatBytes(totalUsed) : '—'}</strong></div>
     <div class="stat-card"><span>${escapeHtml(t('stats.limit'))}</span><strong>${totalLimit ? formatBytes(totalLimit) : '—'}</strong></div>
+    <div class="stat-card"><span>${escapeHtml(t('speed.title'))}</span><strong>${state.speed ? `${state.speed.down} / ${state.speed.up} ${t('speed.unit')}` : '—'}</strong></div>
+    <div class="stat-card"><span>${escapeHtml(t('speed.latency'))}</span><strong>${state.speed ? `${state.speed.latency} ${t('unit.ms')}` : '—'}</strong></div>
     <div class="stat-card"><span>${escapeHtml(t('stats.latency'))}</span><strong class="${pingClass(state.proxyPing)}">${Number.isFinite(state.proxyPing) ? `${state.proxyPing} ${t('unit.ms')}` : '—'}</strong></div>
   </div><p class="muted small">${escapeHtml(t('stats.note'))}</p></section>`;
 }
@@ -573,6 +666,7 @@ function bindEvents() {
   document.querySelector('[data-action="ping"]')?.addEventListener('click', () => pingOne(selectedNode()));
   document.querySelector('[data-action="proxy-ping"]')?.addEventListener('click', () => pingProxy());
   document.querySelector('[data-action="ping-all"]')?.addEventListener('click', () => pingAll());
+  document.querySelector('[data-action="speed-test"]')?.addEventListener('click', () => runSpeedTest());
   document.querySelector('[data-action="cancel-ping"]')?.addEventListener('click', () => { if (state.pingJob) { state.pingJob.cancelled = true; render(); } });
   document.querySelector('[data-action="favorite"]')?.addEventListener('click', () => { const node = selectedNode(); if (node) { commitData({ servers: state.servers.map((item) => item.id === node.id ? { ...item, favorite: !item.favorite } : item) }); render(); } });
   document.querySelector('[data-action="remove"]')?.addEventListener('click', () => {
@@ -591,6 +685,15 @@ function bindEvents() {
     if (busy() || state.connection === 'connected' || state.cleanupNeeded) return;
     if (routeModeIds.includes(event.target.value)) { commitData({ routeMode: event.target.value }); render(); }
   });
+  document.querySelector('#speed-url')?.addEventListener('change', (event) => {
+    commitData({ settings: { ...(state.settings || {}), speedUrl: String(event.target.value || '').trim() } }); render();
+  });
+  document.querySelector('#node-mode')?.addEventListener('change', (event) => {
+    if (['single', 'auto'].includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), nodeMode: event.target.value } }); render(); }
+  });
+  document.querySelector('#dns-mode')?.addEventListener('change', (event) => {
+    if (dnsModeIds.includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), dns: event.target.value } }); render(); }
+  });
   document.querySelector('#language')?.addEventListener('change', (event) => {
     const language = event.target.value === 'en' ? 'en' : 'ru';
     setLanguage(language);
@@ -598,6 +701,11 @@ function bindEvents() {
     commitData({ language, settings: { ...(state.settings || {}), language } });
     render();
   });
+  for (const [id, key] of [['perf-sniffing', 'sniffing'], ['perf-ipv4', 'preferIPv4'], ['perf-tfo', 'tcpFastOpen']]) {
+    document.querySelector(`#${id}`)?.addEventListener('change', (event) => {
+      commitData({ settings: { ...(state.settings || {}), perf: { ...(state.settings?.perf || {}), [key]: event.target.checked } } }); render();
+    });
+  }
   document.querySelectorAll('#debug-mode').forEach((input) => input.addEventListener('change', (event) => {
     const debug = Boolean(event.target.checked);
     commitData({ settings: { ...(state.settings || {}), debug } });
@@ -867,8 +975,43 @@ async function measureNode(node) {
   } catch { return null; }
 }
 
+// The measurement runs inside the WebView, so it uses the system proxy the app
+// has just configured and therefore the same path as any other application.
+async function runSpeedTest() {
+  const url = String(state.settings?.speedUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) { setMessage('speed.needUrl'); state.page = 'settings'; render(); return; }
+  if (state.connection !== 'connected' || state.speedRunning) return;
+  state.speedRunning = true; state.transferActive = true; setMessage('speed.running'); render();
+  try {
+    const times = [];
+    for (let index = 0; index < 3; index += 1) {
+      const started = performance.now();
+      await fetch(url, { method: 'HEAD', cache: 'no-store' });
+      times.push(performance.now() - started);
+    }
+    const latency = Math.round(times.sort((a, b) => a - b)[1]);
+    const downloadStart = performance.now();
+    const response = await fetch(url, { cache: 'no-store' });
+    const reader = response.body.getReader();
+    let bytes = 0;
+    for (;;) { const { done, value } = await reader.read(); if (done) break; bytes += value.length; }
+    const down = bytes * 8 / ((performance.now() - downloadStart) / 1000) / 1e6;
+    const size = 4 * 1024 * 1024;
+    const uploadStart = performance.now();
+    try { await fetch(url, { method: 'POST', body: new Blob([new Uint8Array(size)]), cache: 'no-store' }); } catch { /* сервер может не принимать POST; время отправки всё равно измерено */ }
+    const up = size * 8 / ((performance.now() - uploadStart) / 1000) / 1e6;
+    state.speed = { at: Date.now(), url, latency, down: Math.round(down * 10) / 10, up: Math.round(up * 10) / 10 };
+    commitData({ speed: state.speed });
+    setMessage('speed.done');
+  } catch (error) {
+    setMessage('speed.failed', { error: errorText(error) });
+  } finally {
+    state.speedRunning = false; state.transferActive = false; render();
+  }
+}
+
 async function pingAll() {
-  if (state.pingJob || !capabilities.native) return;
+  if (state.pingJob || !capabilities.native || state.transferActive) return;
   const nodes = [...state.servers];
   if (!nodes.length) return;
   state.pingJob = { total: nodes.length, done: 0, cancelled: false };
@@ -964,6 +1107,14 @@ async function collectDiagnostics() {
     return lines.join('\n');
   } catch { return ''; }
 }
+function autoPool(selected) {
+  if (state.settings?.nodeMode !== 'auto' || !selected) return [];
+  const usable = state.servers.filter((item) => item.id !== selected.id && !unsupportedReason(item) && !item.unsupported);
+  const favorites = usable.filter((item) => item.favorite);
+  const sameCountry = selected.country ? usable.filter((item) => item.country === selected.country && !item.favorite) : [];
+  return [selected, ...(favorites.length ? favorites : sameCountry).slice(0, 5)];
+}
+
 async function startSelected(node) {
   if (!node || unsupportedReason(node)) return;
   if (!capabilities.native || !state.bridgeReady || state.cleanupNeeded) {
@@ -977,7 +1128,8 @@ async function startSelected(node) {
     // Pin the stored node, not a copy: the fingerprint must survive the session.
     if (node.needsPin) { setMessage('state.pinning'); render(); await ensurePin(node); }
     const snapshotNode = copyNode(node);
-    const config = buildXrayConfig([snapshotNode], snapshotNode.id, route, state.routing?.profile || null);
+    const pool = autoPool(snapshotNode);
+    const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: state.settings?.dns, perf: state.settings?.perf, auto: pool.length > 1 ? pool : undefined });
     const result = await desktopBridge.connect({ config, debug: Boolean(state.settings?.debug) });
     if (result?.ok === false) throw Object.assign(new Error('proxyLaunchFailed'), { code: 'proxyLaunchFailed', params: { error: errorText(result.error) } });
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringConnect'), { code: 'xrayExitedDuringConnect' });
@@ -1036,6 +1188,27 @@ async function selectServer(id) {
   }
   commitData({ selectedId: id }); render();
 }
+function appendLocalLog(message) {
+  state.logs = [...state.logs, `${new Date().toLocaleTimeString()} ${message}`].slice(-500);
+  if (state.page === 'logs') render();
+}
+let lastHealthSwitch = 0;
+async function handleHealth(kind, payload) {
+  if (kind === 'restarted') {
+    try { state.logs = (await desktopBridge.readLogs()).split('\n').filter(Boolean); } catch { /* лог необязателен */ }
+    if (state.page === 'logs') render();
+    return;
+  }
+  if (state.connection !== 'connected' || Date.now() - lastHealthSwitch < 60000) return;
+  // The core could not restart the tunnel: try the next node once a minute so a
+  // dead server does not leave the app connected to nothing.
+  const candidates = state.servers.filter((node) => node.id !== state.activeNode?.id && !unsupportedReason(node));
+  const next = candidates.find((node) => node.country && node.country === state.activeNode?.country) || candidates[0];
+  if (!next) { state.proxyCheckFailed = true; setMessage('notice.healthFailed', { error: errorText(payload) }); render(); return; }
+  lastHealthSwitch = Date.now();
+  appendLocalLog(t('notice.healthSwitch', { name: next.name || t('servers.serverFallback') }));
+  await startSelected(next);
+}
 function handleProxyExit(message) {
   if (state.connection === 'disconnecting' || state.connection === 'idle' || state.connection === 'error') return;
   exitSequence += 1;
@@ -1053,6 +1226,7 @@ render();
 void (async () => {
   let watchError = '';
   try { await desktopBridge.watchProxyExit(handleProxyExit); } catch (error) { watchError = errorText(error); }
+  try { await desktopBridge.watchHealth(handleHealth); } catch { /* события доступны только в настольной сборке */ }
   state.watchError = watchError;
   if (!capabilities.native) { state.bridgeReady = !watchError; if (watchError) { state.connection = 'error'; setMessage('state.watchFailed', { error: watchError }); } setMessage('state.previewNoConnect'); render(); return; }
   // The bridge has no status query. On a frontend reload, stop any surviving session before

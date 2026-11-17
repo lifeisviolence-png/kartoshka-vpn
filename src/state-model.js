@@ -50,7 +50,8 @@ export function snapshot(state) {
     previousRouteMode: state.previousRouteMode || null,
     language: state.language === 'en' ? 'en' : 'ru',
     settings: state.settings || {},
-    routing: state.routing || null
+    routing: state.routing || null,
+    speed: state.speed && typeof state.speed === 'object' ? state.speed : null
   };
 }
 
@@ -87,6 +88,7 @@ export function migrateState(raw) {
         previousRouteMode: raw.previousRouteMode || null,
         language: raw.language === 'en' ? 'en' : 'ru',
         settings: raw.settings && typeof raw.settings === 'object' ? raw.settings : {},
+        speed: raw.speed && typeof raw.speed === 'object' ? raw.speed : null,
         routing: raw.routing && typeof raw.routing === 'object' ? raw.routing : null
       },
       migrated: false

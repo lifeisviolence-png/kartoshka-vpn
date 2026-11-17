@@ -247,3 +247,66 @@ test('xray run -test проверяет каждый сгенерированн�
     assert.equal(split.status, 0, `routing requires geoip.dat and geosite.dat: ${split.stderr} ${split.stdout}`);
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
+test('DNS: system не добавляет резолвер, builtin включает DoH, кэш и .ru-сервер', () => {
+  const node = parseOne(vless);
+  const system = buildXrayConfig([node], node.id, 'split', null, { dns: 'system' });
+  assert.equal(system.dns, undefined);
+  assert.equal(system.routing.domainStrategy, 'IPIfNonMatch');
+  const builtin = buildXrayConfig([node], node.id, 'split', null, { dns: 'builtin' });
+  assert.equal(builtin.routing.domainStrategy, 'IPIfNonMatch');
+  assert.equal(builtin.dns.disableCache, false);
+  assert.equal(builtin.dns.queryStrategy, 'UseIPv4');
+  assert.ok(builtin.dns.servers.some((server) => String(server.address).startsWith('https://')));
+  assert.ok(builtin.dns.servers.some((server) => server.address === '77.88.8.8' && server.domains.includes('domain:ru')));
+  // Unknown values must not silently disable resolution for rules.
+  const fallback = buildXrayConfig([node], node.id, 'split', null, { dns: 'nonsense' });
+  assert.equal(fallback.dns, undefined);
+  // Without rules there is nothing to resolve, so no resolver and no routing block.
+  const all = buildXrayConfig([node], node.id, 'all', null, { dns: 'builtin' });
+  assert.equal(all.dns, undefined);
+  assert.equal(all.routing, undefined);
+});
+test('авто: пул узлов, balancer leastPing и observatory; один узел — без balancer', () => {
+  const a = parseOne(vless), b = parseOne(trojan);
+  const auto = buildXrayConfig([a, b], a.id, 'split', null, { auto: [a, b] });
+  assert.deepEqual(auto.outbounds.map((item) => item.tag), ['proxy-1', 'proxy-2', 'direct']);
+  assert.equal(auto.routing.balancers[0].strategy.type, 'leastPing');
+  assert.deepEqual(auto.routing.balancers[0].selector, ['proxy-']);
+  assert.equal(auto.observatory.probeUrl, 'https://www.gstatic.com/generate_204');
+  // The catch-all rule sends everything unmatched to the balancer, never to a tag that does not exist.
+  assert.equal(auto.routing.rules.at(-1).balancerTag, 'auto');
+  assert.equal(auto.routing.rules.some((rule) => rule.outboundTag === 'proxy'), false);
+  const single = buildXrayConfig([a, b], a.id, 'split', null, { auto: [a] });
+  assert.deepEqual(single.outbounds.map((item) => item.tag), ['proxy', 'direct']);
+  assert.equal(single.routing.balancers, undefined);
+  assert.equal(single.observatory, undefined);
+  if (process.env.XRAY_TEST_BIN) {
+    const dir = mkdtempSync(join(tmpdir(), 'kartovpn-auto-'));
+    try {
+      const path = join(dir, 'auto.json');
+      writeFileSync(path, JSON.stringify(auto), { mode: 0o600 });
+      const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `xray rejected the auto config: ${result.stderr} ${result.stdout}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+test('опции производительности: sniffing, IPv4 и TFO выключены по умолчанию', () => {
+  const node = parseOne(vless);
+  const base = buildXrayConfig([node], node.id, 'all');
+  assert.equal(base.inbounds[0].sniffing, undefined);
+  assert.equal(base.outbounds[0].streamSettings.sockopt, undefined);
+  const tuned = buildXrayConfig([node], node.id, 'all', null, { perf: { sniffing: true, preferIPv4: true, tcpFastOpen: true } });
+  assert.deepEqual(tuned.inbounds[0].sniffing.destOverride, ['http', 'tls', 'quic']);
+  assert.equal(tuned.inbounds[0].sniffing.routeOnly, true);
+  assert.equal(tuned.outbounds[0].streamSettings.sockopt.domainStrategy, 'UseIPv4');
+  assert.equal(tuned.outbounds[0].streamSettings.sockopt.tcpFastOpen, true);
+  if (process.env.XRAY_TEST_BIN) {
+    const dir = mkdtempSync(join(tmpdir(), 'kartovpn-perf-'));
+    try {
+      const path = join(dir, 'tuned.json');
+      writeFileSync(path, JSON.stringify(tuned), { mode: 0o600 });
+      const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `xray rejected the tuned config: ${result.stderr} ${result.stdout}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});

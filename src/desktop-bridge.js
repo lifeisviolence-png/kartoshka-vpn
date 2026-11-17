@@ -57,6 +57,14 @@ export const desktopBridge = {
     if (!isDesktop) return () => {};
     return listen('proxy-exited', (event) => callback(event.payload));
   },
+  async watchHealth(callback) {
+    if (!isDesktop) return () => {};
+    const stops = await Promise.all([
+      listen('proxy-restarted', (event) => callback('restarted', event.payload)),
+      listen('proxy-unhealthy', (event) => callback('unhealthy', event.payload))
+    ]);
+    return () => stops.forEach((stop) => stop());
+  },
   getCapabilities() {
     return { systemProxy: isDesktop, subscriptionImport: true, geofiles: false, native: isDesktop };
   }

@@ -181,7 +181,25 @@ const DEFAULT_DIRECT = {
   ips: ['geoip:ru', 'geoip:private', '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10']
 };
 
-export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = null) {
+// DNS modes, measured in docs/perf.md:
+//   system  — no dns block, exactly 0.9.0: the core never resolves a name on its
+//             own, so IP rules cannot match a domain destination;
+//   builtin — the core resolves through DoH and keeps the answers, so IP rules
+//             work and the provider domain never reaches the local resolver.
+export const DNS_MODES = ['system', 'builtin'];
+function builtinDns() {
+  return {
+    servers: [
+      { address: 'https://1.1.1.1/dns-query', domains: ['geosite:geolocation-!cn'], skipFallback: true },
+      { address: '77.88.8.8', domains: ['domain:ru', 'geosite:category-ru'], skipFallback: true },
+      { address: '8.8.8.8' }
+    ],
+    queryStrategy: 'UseIPv4',
+    disableCache: false
+  };
+}
+
+export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = null, options = {}) {
   if (!['all', 'auto', 'split'].includes(routeMode)) failCode('config.routeMode');
   if (!Array.isArray(nodes)) failCode('config.nodes');
   const selected = nodes.find(node => node?.id === selectedId);
@@ -211,16 +229,48 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
     rules.push({ type: 'field', domain: DEFAULT_DIRECT.domains, outboundTag: 'direct' });
     rules.push({ type: 'field', ip: DEFAULT_DIRECT.ips, outboundTag: 'direct' });
   }
-  const outbounds = [toXrayOutbound(selected)];
+  const dnsMode = DNS_MODES.includes(options.dns) ? options.dns : 'system';
+  // Tuning is opt-in: each switch was measured on the stand (docs/perf.md) and
+  // none of them improved the median by the required 10 %, so all default off.
+  const perf = options.perf && typeof options.perf === 'object' ? options.perf : {};
+  const sniffing = perf.sniffing === true;
+  const sockopt = {
+    ...(perf.preferIPv4 === true ? { domainStrategy: 'UseIPv4' } : {}),
+    ...(perf.tcpFastOpen === true ? { tcpFastOpen: true, tcpKeepAliveIdle: 45 } : {})
+  };
+  // Without rules nothing needs an address, so the core must not resolve names
+  // on the client: that is both a delay and a leak to the local resolver.
+  const domainStrategy = rules.length ? 'IPIfNonMatch' : 'AsIs';
+  // Auto mode puts several nodes into one configuration and lets the core pick
+  // the one with the lowest probe latency; a dead node drops out of the pool.
+  const pool = Array.isArray(options.auto) ? options.auto.filter((item) => item && item.id && !item.unsupported).slice(0, 8) : [];
+  const balanced = pool.length > 1;
+  const outbounds = balanced
+    ? pool.map((item, index) => ({ ...toXrayOutbound(item), tag: `proxy-${index + 1}` }))
+    : [toXrayOutbound(selected)];
+  if (Object.keys(sockopt).length) {
+    for (const outbound of outbounds) {
+      if (outbound.tag === 'direct' || outbound.tag === 'block') continue;
+      outbound.streamSettings = { ...(outbound.streamSettings || {}), sockopt: { ...(outbound.streamSettings?.sockopt || {}), ...sockopt } };
+    }
+  }
   if (needsDirect) outbounds.push({ tag: 'direct', protocol: 'freedom' });
   if (needsBlock) outbounds.push({ tag: 'block', protocol: 'blackhole' });
+  if (balanced) {
+    for (const rule of rules) {
+      if (rule.outboundTag === 'proxy') { delete rule.outboundTag; rule.balancerTag = 'auto'; }
+    }
+    rules.push({ type: 'field', network: 'tcp,udp', balancerTag: 'auto' });
+  }
   return {
     log: { loglevel: 'warning' },
     inbounds: [
-      { tag: 'http-in', listen: '127.0.0.1', port: 2080, protocol: 'http', settings: { allowTransparent: false } },
-      { tag: 'socks-in', listen: '127.0.0.1', port: 2081, protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' } }
+      { tag: 'http-in', listen: '127.0.0.1', port: 2080, protocol: 'http', settings: { allowTransparent: false }, ...(sniffing ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}) },
+      { tag: 'socks-in', listen: '127.0.0.1', port: 2081, protocol: 'socks', settings: { auth: 'noauth', udp: true, ip: '127.0.0.1' }, ...(sniffing ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {}) }
     ],
     outbounds,
-    ...(rules.length ? { routing: { domainStrategy: 'IPIfNonMatch', rules } } : {})
+    ...(rules.length ? { routing: { domainStrategy, ...(balanced ? { balancers: [{ tag: 'auto', selector: ['proxy-'], strategy: { type: 'leastPing' } }] } : {}), rules } } : {}),
+    ...(rules.length && dnsMode === 'builtin' ? { dns: builtinDns() } : {}),
+    ...(balanced ? { observatory: { subjectSelector: ['proxy-'], probeUrl: 'https://www.gstatic.com/generate_204', probeInterval: '30s', enableConcurrency: true } } : {})
   };
 }
