@@ -1131,18 +1131,41 @@ async fn lookup_countries(app: AppHandle, hosts: Vec<String>) -> Vec<CountryLook
         let host = host.trim().trim_matches(['[', ']']).to_string();
         if !host.is_empty() && !unique.iter().any(|item| item.eq_ignore_ascii_case(&host)) { unique.push(host); }
     }
+    if unique.is_empty() { return Vec::new(); }
+    // A subscription can carry a hundred hostnames. Resolving them one by one
+    // would freeze the flag column for minutes, so the lookups run in small
+    // batches under one shared deadline; unresolved hosts simply stay unknown.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut queue = unique.into_iter();
     let mut result = Vec::new();
-    for host in unique {
-        let address = match host.parse::<std::net::IpAddr>() {
-            Ok(std::net::IpAddr::V4(address)) => Some(address),
-            Ok(std::net::IpAddr::V6(_)) => None,
-            Err(_) => match timeout(Duration::from_secs(3), tokio::net::lookup_host((host.as_str(), 0))).await {
-                Ok(Ok(addresses)) => addresses.filter_map(|item| match item.ip() { std::net::IpAddr::V4(address) => Some(address), _ => None }).next(),
-                _ => None,
-            },
-        };
-        let code = address.and_then(|address| db.lookup(address)).map(str::to_owned);
-        result.push(CountryLookup { host, code });
+    let mut tasks = tokio::task::JoinSet::new();
+    let spawn = |tasks: &mut tokio::task::JoinSet<CountryLookup>, host: String| {
+        tasks.spawn(async move {
+            let address = match host.parse::<std::net::IpAddr>() {
+                Ok(std::net::IpAddr::V4(address)) => Some(address),
+                Ok(std::net::IpAddr::V6(_)) => None,
+                Err(_) => match timeout(Duration::from_secs(3), tokio::net::lookup_host((host.as_str(), 0))).await {
+                    Ok(Ok(addresses)) => addresses.filter_map(|item| match item.ip() { std::net::IpAddr::V4(address) => Some(address), _ => None }).next(),
+                    _ => None,
+                },
+            };
+            let code = address.and_then(|address| db.lookup(address)).map(str::to_owned);
+            CountryLookup { host, code }
+        });
+    };
+    for _ in 0..8 { if let Some(host) = queue.next() { spawn(&mut tasks, host); } }
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => { tasks.abort_all(); break; }
+            joined = tasks.join_next() => {
+                match joined {
+                    Some(Ok(item)) => result.push(item),
+                    Some(Err(_)) => {},
+                    None => break,
+                }
+                if let Some(host) = queue.next() { spawn(&mut tasks, host); }
+            }
+        }
     }
     result
 }
