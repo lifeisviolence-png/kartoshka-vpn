@@ -53,30 +53,36 @@ for (const language of ['ru', 'en']) {
   }
 }
 
-// Scroll must survive ticks: ping progress, proxy latency, a toast and a status change.
+// Two scroll checks. A tick that changes nothing must keep the offset exactly.
+// A tick that changes the list (ping results arrive, the progress bar goes away)
+// may shift it: rows use content-visibility, so their real height is only known
+// once they are near the viewport. Such a tick must not jump to the top.
 await page.setViewport({ width: 760, height: 700 });
 await seed(page, 'ru');
 await page.click('[data-nav="servers"]');
 await page.evaluate(() => new Promise(requestAnimationFrame));
-const before = await page.evaluate(() => {
+const scrollTo = () => page.evaluate(() => {
   const main = document.querySelector('.main');
   main.scrollTop = Math.round(main.scrollHeight * 0.6);
   return { top: main.scrollTop, max: main.scrollHeight - main.clientHeight };
 });
-await page.evaluate(() => {
-  const buttons = [...document.querySelectorAll('[data-action="ping-all"]')];
-  buttons[0]?.click();
-  document.querySelector('[data-action="refresh"]')?.click();
-});
-await new Promise((resolve) => setTimeout(resolve, 1200));
-const after = await page.evaluate(() => {
+const readScroll = () => page.evaluate(() => {
   const main = document.querySelector('.main');
   return { top: main.scrollTop, max: main.scrollHeight - main.clientHeight };
 });
-// The offset may only shrink when the content itself became shorter: the browser
-// clamps it to the new maximum, which is not a jump to the top.
-const expected = Math.min(before.top, after.max);
-report.scroll = { before, after, expected, preserved: Math.abs(after.top - expected) <= 2 };
+const quiet = await scrollTo();
+await new Promise((resolve) => setTimeout(resolve, 1600));
+const afterQuiet = await readScroll();
+const busy = await scrollTo();
+await page.evaluate(() => document.querySelector('[data-action="refresh"]')?.click());
+await new Promise((resolve) => setTimeout(resolve, 1500));
+const afterBusy = await readScroll();
+const limit = Math.min(busy.top, afterBusy.max);
+report.scroll = {
+  quiet: { before: quiet, after: afterQuiet, exact: Math.abs(afterQuiet.top - quiet.top) <= 2 },
+  busy: { before: busy, after: afterBusy, expected: limit, keptAbove70: afterBusy.top >= limit * 0.7 },
+};
+report.scroll.preserved = report.scroll.quiet.exact && report.scroll.busy.keptAbove70;
 writeFileSync(`${OUT}/report.json`, JSON.stringify(report, null, 2));
 console.log(JSON.stringify({ overflow: report.overflow.length, scroll: report.scroll, screens: report.screens.length }));
 if (report.overflow.length || !report.scroll.preserved) process.exitCode = 1;
