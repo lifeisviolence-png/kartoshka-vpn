@@ -90,6 +90,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "JavaScript Xray tests failed ($LASTEXITCODE)" }
           node --test tests/frontend-regressions.test.js
           if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed ($LASTEXITCODE)" }
+          node --test tests/countries.test.js tests/state-model.test.js tests/i18n.test.js tests/version.test.js
+          if ($LASTEXITCODE -ne 0) { throw "Interface, state and version tests failed ($LASTEXITCODE)" }
       - name: Real Windows registry, watchdog crash and loopback Xray smoke
         shell: pwsh
         env:
