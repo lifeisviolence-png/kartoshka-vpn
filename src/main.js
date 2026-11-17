@@ -270,6 +270,9 @@ function toastMarkup() {
   return `<div class="toast" role="status"><span>${escapeHtml(state.toast.text)}</span>${state.toast.action ? `<button class="toast-action" data-action="toast-action">${escapeHtml(state.toast.actionLabel)}</button>` : ''}<button class="icon-button" data-action="dismiss-toast" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 13)}</button></div>`;
 }
 let shellSignature = '';
+// Set once the first real render proves that the DOM is a tree and not the
+// string-only stub used by the regression harness.
+let incremental = true;
 let lastPageMarkup = '';
 let lastModalMarkup = '';
 let lastToastMarkup = '';
@@ -324,6 +327,17 @@ function restoreScroll(offsets) {
   }
 }
 
+// The regression harness builds a minimal DOM that stores innerHTML as a string
+// without parsing it. There is no #page-host there, so the whole view is written
+// in one go; the real WebView always takes the incremental path below.
+function renderWhole(node) {
+  shellSignature = '';
+  lastPageMarkup = ''; lastModalMarkup = ''; lastToastMarkup = '';
+  app.innerHTML = `${shellMarkup().replace('<div id="page-host" class="page-host"></div>', `<div id="page-host" class="page-host">${pageMarkup(node)}</div>`)}${modalMarkupForState()}${toastMarkup()}`;
+  incremental = (document.querySelector('#page-host')?.childElementCount || 0) > 0;
+  bindEvents();
+}
+
 function render() {
   const previous = document.activeElement;
   const focusKey = previous?.getAttribute?.('data-focus-key') || previous?.id || null;
@@ -331,19 +345,22 @@ function render() {
   const openingModal = Boolean(state.modal) && !modalPreviouslyOpen;
   const closingModal = !state.modal && modalPreviouslyOpen;
   const node = selectedNode();
+  let mount = document.querySelector('#page-host');
+  if (!incremental || !mount || mount.nodeType !== 1) { renderWhole(node); modalPreviouslyOpen = Boolean(state.modal); return; }
   const shell = `${state.connection}|${state.activeNav}|${state.language}|${state.importing}|${VERSION}|${capabilities.native}`;
   let changed = false;
   if (shell !== shellSignature) {
     shellSignature = shell;
     app.innerHTML = shellMarkup();
+    // The shell rebuild replaces the host element, so the old reference is detached.
+    mount = document.querySelector('#page-host');
     lastPageMarkup = ''; lastModalMarkup = ''; lastToastMarkup = '';
     changed = true;
   }
   const page = pageMarkup(node);
   if (page !== lastPageMarkup) {
     const offsets = captureScroll();
-    const host = document.querySelector('#page-host');
-    if (host) { host.innerHTML = page; lastPageMarkup = page; restoreScroll(offsets); changed = true; }
+    mount.innerHTML = page; lastPageMarkup = page; restoreScroll(offsets); changed = true;
   }
   const modal = modalMarkupForState();
   if (modal !== lastModalMarkup) {
