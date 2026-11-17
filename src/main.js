@@ -88,13 +88,6 @@ if (loaded.migrated) {
 }
 
 const app = document.querySelector('#app');
-// Settings that need no restart are saved straight from the control.
-app.addEventListener?.('change', (event) => {
-  if (event.target?.id !== 'failover-mode') return;
-  state.settings = { ...(state.settings || {}), failover: event.target.value };
-  try { if (typeof save === 'function') save(); } catch { /* сохранение не критично для перерисовки */ }
-  render();
-});
 let exitSequence = 0;
 let operationSequence = 0;
 let sessionSequence = 0;
@@ -712,6 +705,9 @@ function bindEvents() {
   document.querySelector('#dns-mode')?.addEventListener('change', (event) => {
     if (dnsModeIds.includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), dns: event.target.value } }); render(); }
   });
+  document.querySelector('#failover-mode')?.addEventListener('change', (event) => {
+    if (['country', 'any', 'never'].includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), failover: event.target.value } }); render(); }
+  });
   document.querySelector('#language')?.addEventListener('change', (event) => {
     const language = event.target.value === 'en' ? 'en' : 'ru';
     setLanguage(language);
@@ -1210,6 +1206,14 @@ function appendLocalLog(message) {
   state.logs = [...state.logs, `${new Date().toLocaleTimeString()} ${message}`].slice(-500);
   if (state.page === 'logs') render();
 }
+// Pure policy: which node may replace the failed one. Kept separate so the
+// three modes are testable without a live tunnel.
+function failoverCandidate(servers, active, mode, isUsable) {
+  if (mode === 'never') return null;
+  const candidates = servers.filter((node) => node.id !== active?.id && isUsable(node));
+  if (mode === 'any') return candidates[0] || null;
+  return candidates.find((node) => node.country && node.country === active?.country) || null;
+}
 let lastHealthSwitch = 0;
 async function handleHealth(kind, payload) {
   if (kind === 'restarted') {
@@ -1222,8 +1226,7 @@ async function handleHealth(kind, payload) {
   // the external IP, so it is a setting: same country by default.
   const failover = state.settings?.failover === 'any' || state.settings?.failover === 'never' ? state.settings.failover : 'country';
   if (failover === 'never') { state.proxyCheckFailed = true; setMessage('notice.healthNoSwitch', { error: errorText(payload) }); render(); return; }
-  const candidates = state.servers.filter((node) => node.id !== state.activeNode?.id && !unsupportedReason(node));
-  const next = failover === 'country' ? candidates.find((node) => node.country && node.country === state.activeNode?.country) : candidates[0];
+  const next = failoverCandidate(state.servers, state.activeNode, failover, (node) => !unsupportedReason(node));
   if (!next) { state.proxyCheckFailed = true; setMessage('notice.healthFailed', { error: errorText(payload) }); render(); return; }
   lastHealthSwitch = Date.now();
   const label = next.name || t('servers.serverFallback');

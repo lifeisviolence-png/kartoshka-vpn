@@ -131,7 +131,7 @@ export function toXrayOutbound(node) {
   const protocol = String(o.type || '').toLowerCase();
   if (!['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2'].includes(protocol)) failCode('config.protocol');
   const common = ['type','tag','server','server_port','tls','transport'];
-  const specific = { vless:['uuid','flow','encryption','packet_encoding'], vmess:['uuid','security','alter_id'], trojan:['password'], shadowsocks:['method','password'], hysteria2:['password','obfs'] };
+  const specific = { vless:['uuid','flow','encryption','packet_encoding'], vmess:['uuid','security','alter_id'], trojan:['password'], shadowsocks:['method','password'], hysteria2:['password','obfs','up','down','congestion'] };
   if (Object.keys(o).some(key => !common.includes(key) && !specific[protocol].includes(key))) failCode('config.nodeParams');
   const address = cleanHost(string(o.server, 'Не указан адрес сервера'));
   if (/\s|[\/@?#]/.test(address)) failCode('config.badAddress');

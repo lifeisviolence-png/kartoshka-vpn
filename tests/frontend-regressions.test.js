@@ -18,7 +18,7 @@ const U4 = '44444444-4444-4444-8444-444444444444';
 const link = (uuid, host = 'one.example', name = 'Node', type = 'tcp') => `vless://${uuid}@${host}:443?type=${type}#${name}`;
 const key = 'kartoshka.state.v2';
 const source = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
-  .replace(/^import .*;\s*$/gm, '') + `\n;globalThis.hooks = { state, prepareImport, applyImport, runImport, applyPendingImport, importSummary, ensurePin, selectServer, toggleConnection, toggleDisabled, pingProxy, pingOne, pingAll, refreshSubscription, deleteSubscription, homeMarkup, serversMarkup, settingsMarkup, logsMarkup, statusInfo, nodeIdentity, nodeSignature, commitData, render, setLanguage, mergeKey, enrichCountries };`;
+  .replace(/^import .*;\s*$/gm, '') + `\n;globalThis.hooks = { state, prepareImport, applyImport, runImport, applyPendingImport, importSummary, ensurePin, selectServer, toggleConnection, toggleDisabled, pingProxy, pingOne, pingAll, refreshSubscription, deleteSubscription, homeMarkup, serversMarkup, settingsMarkup, logsMarkup, statusInfo, nodeIdentity, nodeSignature, commitData, render, setLanguage, mergeKey, enrichCountries, handleHealth, failoverCandidate };`;
 
 function storage(initial = {}) {
   const data = new Map(Object.entries(initial));
@@ -274,4 +274,33 @@ test('country flags are detected from the provider name before any network looku
   const html = h.serversMarkup(byHost['de.example']);
   assert.match(html, /\/flags\/de\.svg/);
   assert.match(html, /Германия/);
+});
+
+const policyNodes = [
+  { id: 'a', name: 'DE-1', country: 'DE' },
+  { id: 'b', name: 'DE-2', country: 'DE' },
+  { id: 'c', name: 'US-1', country: 'US' }
+];
+test('автопереключение: политика выбора узла для трёх режимов', async () => {
+  const h = await setup();
+  const pick = (mode, active, nodes = policyNodes) => h.failoverCandidate(nodes, active, mode, () => true);
+  assert.equal(pick('never', policyNodes[0]), null);
+  assert.equal(pick('country', policyNodes[0]).id, 'b');
+  // No node of the same country: the policy must not silently change the country.
+  assert.equal(pick('country', policyNodes[2]), null);
+  assert.equal(pick('any', policyNodes[2]).id, 'a');
+  // An unusable node is never chosen.
+  const onlyBroken = [policyNodes[0], policyNodes[1]];
+  assert.equal(h.failoverCandidate(onlyBroken, policyNodes[0], 'any', (node) => node.id !== 'b'), null);
+});
+test('автопереключение: «не переключать» оставляет узел и показывает notice.healthNoSwitch', async () => {
+  const h = await setup({ native: true });
+  await importAndApply(h, 'https://provider.example/sub', [link(U1, 'de1.example', 'DE-1'), link(U2, 'de2.example', 'DE-2')].join('\n'));
+  h.state.connection = 'connected';
+  h.state.bridgeReady = true;
+  h.state.activeNode = h.state.servers[0];
+  h.state.settings = { ...(h.state.settings || {}), failover: 'never' };
+  await h.handleHealth('unhealthy', 'core stopped');
+  assert.equal(h.state.activeNode.id, h.state.servers[0].id);
+  assert.equal(h.state.message.key, 'notice.healthNoSwitch');
 });
