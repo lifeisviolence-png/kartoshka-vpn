@@ -35,7 +35,10 @@
     "resources": {
       "binaries/xray-assets/": "xray-assets/",
       "binaries/licenses/": "licenses/",
-      "resources/country-ipv4.bin.gz": "country-ipv4.bin.gz"
+      "resources/country-ipv4.bin.gz": "country-ipv4.bin.gz",
+      "resources/licenses/DB-IP-LICENSE.txt": "licenses/DB-IP-LICENSE.txt",
+      "resources/licenses/flag-icons-LICENSE.txt": "licenses/flag-icons-LICENSE.txt",
+      "resources/licenses/Lucide-LICENSE.txt": "licenses/Lucide-LICENSE.txt"
     },
     "icon": [
       "icons/32x32.png",

@@ -196,7 +196,7 @@ jobs:
           $dest = Join-Path $env:RUNNER_TEMP 'kartoshka-installed'
           $result = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$dest") -Wait -PassThru
           if ($result.ExitCode -ne 0) { throw "NSIS installation failed: $($result.ExitCode)" }
-          foreach ($file in @('xray.exe','xray-assets/geoip.dat','xray-assets/geosite.dat','licenses/Xray-MPL-2.0.txt','licenses/Xray-rules-LICENSE.txt','licenses/Xray-rules-LICENSE-GeoSite.txt','licenses/Xray-rules-LICENSE-GeoSite-inherit.txt')) {
+          foreach ($file in @('xray.exe','xray-assets/geoip.dat','xray-assets/geosite.dat','licenses/Xray-MPL-2.0.txt','licenses/Xray-rules-LICENSE.txt','licenses/Xray-rules-LICENSE-GeoSite.txt','licenses/Xray-rules-LICENSE-GeoSite-inherit.txt','licenses/DB-IP-LICENSE.txt','licenses/flag-icons-LICENSE.txt','licenses/Lucide-LICENSE.txt','country-ipv4.bin.gz')) {
             if (-not (Test-Path (Join-Path $dest $file))) { throw "Installed file missing: $file" }
           }
           $env:XRAY_LOCATION_ASSET = Join-Path $dest 'xray-assets'
