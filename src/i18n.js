@@ -415,7 +415,7 @@ const strings = {
     'app.name': 'KartoshkaVPN',
     'app.tagline': 'DESKTOP CLIENT',
     'app.windowsProxy': 'WINDOWS PROXY',
-    'app.preview': 'Предпросмотр',
+    'app.preview': 'Preview',
     'app.refresh': 'Refresh subscription',
     'app.close': 'Close',
     'app.cancel': 'Cancel',
