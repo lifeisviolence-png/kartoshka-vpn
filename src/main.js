@@ -69,6 +69,7 @@ const state = {
   notice: null,
   toast: null,
   logs: [],
+  transferActive: false,
   search: '',
   sort: 'country',
   collapsed: [],
@@ -873,7 +874,7 @@ async function measureNode(node) {
 }
 
 async function pingAll() {
-  if (state.pingJob || !capabilities.native) return;
+  if (state.pingJob || !capabilities.native || state.transferActive) return;
   const nodes = [...state.servers];
   if (!nodes.length) return;
   state.pingJob = { total: nodes.length, done: 0, cancelled: false };
@@ -1041,6 +1042,27 @@ async function selectServer(id) {
   }
   commitData({ selectedId: id }); render();
 }
+function appendLocalLog(message) {
+  state.logs = [...state.logs, `${new Date().toLocaleTimeString()} ${message}`].slice(-500);
+  if (state.page === 'logs') render();
+}
+let lastHealthSwitch = 0;
+async function handleHealth(kind, payload) {
+  if (kind === 'restarted') {
+    try { state.logs = (await desktopBridge.readLogs()).split('\n').filter(Boolean); } catch { /* лог необязателен */ }
+    if (state.page === 'logs') render();
+    return;
+  }
+  if (state.connection !== 'connected' || Date.now() - lastHealthSwitch < 60000) return;
+  // The core could not restart the tunnel: try the next node once a minute so a
+  // dead server does not leave the app connected to nothing.
+  const candidates = state.servers.filter((node) => node.id !== state.activeNode?.id && !unsupportedReason(node));
+  const next = candidates.find((node) => node.country && node.country === state.activeNode?.country) || candidates[0];
+  if (!next) { state.proxyCheckFailed = true; setMessage('notice.healthFailed', { error: errorText(payload) }); render(); return; }
+  lastHealthSwitch = Date.now();
+  appendLocalLog(t('notice.healthSwitch', { name: next.name || t('servers.serverFallback') }));
+  await startSelected(next);
+}
 function handleProxyExit(message) {
   if (state.connection === 'disconnecting' || state.connection === 'idle' || state.connection === 'error') return;
   exitSequence += 1;
@@ -1058,6 +1080,7 @@ render();
 void (async () => {
   let watchError = '';
   try { await desktopBridge.watchProxyExit(handleProxyExit); } catch (error) { watchError = errorText(error); }
+  try { await desktopBridge.watchHealth(handleHealth); } catch { /* события доступны только в настольной сборке */ }
   state.watchError = watchError;
   if (!capabilities.native) { state.bridgeReady = !watchError; if (watchError) { state.connection = 'error'; setMessage('state.watchFailed', { error: watchError }); } setMessage('state.previewNoConnect'); render(); return; }
   // The bridge has no status query. On a frontend reload, stop any surviving session before

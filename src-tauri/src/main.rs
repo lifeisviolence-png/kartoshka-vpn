@@ -2,7 +2,7 @@
 
 mod country;
 
-use std::{fs, io::Write, net::TcpStream as StdTcpStream, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant}};
+use std::{fs, io::Write, net::TcpStream as StdTcpStream, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime}};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use tokio::{net::TcpStream, time::timeout};
@@ -29,7 +29,7 @@ struct LegacySnapshot { values: Vec<LegacyValue> }
 #[serde(deny_unknown_fields)]
 struct LegacyValue { name: String, kind: String, value: String }
 
-struct ProxyRuntime { child: Option<Child>, watchdog: Option<Child>, snapshot_path: Option<PathBuf>, ports: Vec<u16>, generation: u64 }
+struct ProxyRuntime { child: Option<Child>, watchdog: Option<Child>, snapshot_path: Option<PathBuf>, ports: Vec<u16>, generation: u64, config: Option<String> }
 struct ProxyState(Arc<Mutex<ProxyRuntime>>);
 #[derive(Serialize)]
 struct SubscriptionResponse { body: String, userinfo: Option<String> }
@@ -853,6 +853,133 @@ fn activate_guarded(runtime: &mut ProxyRuntime, mut child: Child, path: &Path, f
     runtime.snapshot_path = Some(path.to_path_buf()); runtime.child = Some(child); runtime.watchdog = watcher; runtime.ports = ports.to_vec();
     Ok(runtime.generation)
 }
+
+fn spawn_monitor(app: AppHandle, monitor: Arc<Mutex<ProxyRuntime>>, generation: u64) {
+    std::thread::spawn(move || {
+        let mut reason: Option<String> = None;
+        let mut check_errors = 0u32;
+        let mut warned = false;
+        let mut next_retry = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+            let result = {
+                let mut guard = match monitor.lock() { Ok(g) => g, Err(_) => break };
+                if guard.generation != generation { break; }
+                record_health(&mut reason, &mut check_errors, inspect_runtime(&mut guard));
+                if reason.is_some() && Instant::now() >= next_retry { Some(stop_runtime(&mut guard)) } else { None }
+            };
+            if let Some(restore) = result {
+                let description = reason.as_deref().unwrap_or("Ошибка proxy");
+                match restore {
+                    Ok(()) => {
+                        let message = format!("{description}; настройки proxy восстановлены");
+                        append_log(&app, &message);
+                        let _ = app.emit("proxy-exited", message);
+                        break;
+                    },
+                    Err(e) => {
+                        if !warned {
+                            let message = format!("{description}. ОШИБКА восстановления proxy: {e}. Защита может отсутствовать; проверьте настройки Windows и повторите восстановление. Монитор продолжит попытки без намеренной перезаписи сторонних настроек.");
+                            append_log(&app, &message);
+                            let _ = app.emit("proxy-exited", message);
+                            warned = true;
+                        }
+                        next_retry = Instant::now() + Duration::from_secs(5);
+                    },
+                }
+            }
+        }
+    });
+}
+// A suspend or a network switch leaves the live sockets dead while the process
+// is still alive, so the process monitor cannot see it. The address of the
+// outgoing interface changes on a switch, and the wall clock jumps ahead of the
+// monotonic clock after a suspend.
+fn local_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("1.1.1.1:53").ok()?;
+    match socket.local_addr().ok()? { std::net::SocketAddr::V4(addr) => Some(*addr.ip()), _ => None }
+}
+fn clock_jumped(wall: Duration, mono: Duration) -> bool { wall.as_secs() > mono.as_secs() + 20 }
+fn health_probe() -> bool {
+    use std::io::{Read, Write};
+    for host in ["connectivitycheck.gstatic.com", "cp.cloudflare.com"] {
+        let Ok(mut stream) = StdTcpStream::connect_timeout(&([127, 0, 0, 1], 2080).into(), Duration::from_secs(2)) else { continue };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(4)));
+        let request = format!("GET http://{host}/generate_204 HTTP/1.1\r\nHost: {host}\r\nUser-Agent: KartoshkaHealth/1\r\nConnection: close\r\n\r\n");
+        if stream.write_all(request.as_bytes()).is_err() { continue; }
+        let mut buffer = [0u8; 32];
+        if let Ok(read) = stream.read(&mut buffer) {
+            let head = String::from_utf8_lossy(&buffer[..read]);
+            if head.starts_with("HTTP/1.1 204") || head.starts_with("HTTP/1.0 204") { return true; }
+        }
+    }
+    false
+}
+fn spawn_health(app: AppHandle, runtime: Arc<Mutex<ProxyRuntime>>, generation: u64) {
+    std::thread::spawn(move || {
+        let mut generation = generation;
+        let mut failures = 0u32;
+        let mut last_wall = SystemTime::now();
+        let mut last_tick = Instant::now();
+        let mut last_ip = local_ipv4();
+        let mut next_probe = Instant::now() + Duration::from_secs(30);
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let config = {
+                let guard = match runtime.lock() { Ok(g) => g, Err(_) => break };
+                if guard.generation != generation || guard.child.is_none() { break; }
+                guard.config.clone()
+            };
+            let wall = SystemTime::now();
+            let wall_delta = wall.duration_since(last_wall).unwrap_or_default();
+            let mono_delta = last_tick.elapsed();
+            last_wall = wall; last_tick = Instant::now();
+            let slept = clock_jumped(wall_delta, mono_delta);
+            let ip = local_ipv4();
+            let network_changed = ip != last_ip;
+            last_ip = ip;
+            if slept || network_changed {
+                append_log(&app, if slept { "Обнаружен выход из сна; проверяю туннель" } else { "Обнаружена смена сети; проверяю туннель" });
+                next_probe = Instant::now();
+            }
+            if Instant::now() < next_probe { continue; }
+            next_probe = Instant::now() + Duration::from_secs(30);
+            if health_probe() { failures = 0; continue; }
+            failures += 1;
+            // After a suspend or a switch the old sockets are already dead, so
+            // one failed probe is enough there; otherwise three in a row.
+            let threshold = if slept || network_changed { 1 } else { 3 };
+            if failures < threshold { continue; }
+            append_log(&app, "Health-check: туннель не отвечает; перезапускаю ядро");
+            let Some(config) = config else { break };
+            let restart = (|| -> Result<u64, String> {
+                let binary = xray_path()?;
+                let assets = app.path().resource_dir().map_err(|e| e.to_string())?.join("xray-assets");
+                let path = snapshot_path(&app)?;
+                let mut guard = runtime.lock().map_err(|_| "Ошибка блокировки состояния".to_string())?;
+                if guard.generation != generation { return Err("Ядро уже перезапущено".into()); }
+                stop_runtime(&mut guard)?;
+                start_runtime(&mut guard, &binary, &assets, &path, &config, None)
+            })();
+            match restart {
+                Ok(next) => {
+                    generation = next; failures = 0;
+                    append_log(&app, "Health-check: ядро перезапущено");
+                    spawn_monitor(app.clone(), runtime.clone(), next);
+                    let _ = app.emit("proxy-restarted", "Health-check перезапустил ядро".to_string());
+                },
+                Err(e) => {
+                    append_log(&app, &format!("Health-check: перезапуск не удался: {e}"));
+                    let _ = app.emit("proxy-unhealthy", e);
+                    break;
+                },
+            }
+        }
+    });
+}
+
 fn start_runtime(runtime: &mut ProxyRuntime, binary: &Path, assets: &Path, path: &Path, config_json: &str, fail_after: Option<usize>) -> Result<u64, String> {
     let ports = validate_config(config_json)?;
     if path.exists() && runtime.snapshot_path.is_none() {
@@ -879,7 +1006,9 @@ fn start_runtime(runtime: &mut ProxyRuntime, binary: &Path, assets: &Path, path:
         }
     })();
     if let Err(e) = ready { let _ = stop_child(&mut child); return Err(e); }
-    activate_guarded(runtime, child, path, fail_after, &ports)
+    let generation = activate_guarded(runtime, child, path, fail_after, &ports)?;
+    runtime.config = Some(config_json.to_string());
+    Ok(generation)
 }
 #[derive(Debug, PartialEq, Eq)]
 enum MonitorHealth { Healthy, Fault(String), CheckError(String) }
@@ -1059,43 +1188,8 @@ async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: 
     }).await.map_err(|e| e.to_string())??;
     if result.is_ok() { append_log(&app, "Xray и watchdog запущены; обход WinINet: <local>, 127.0.0.1, [::1]."); }
     if let Some(generation) = generation {
-        let monitor = state.0.clone();
-        let monitor_app = app.clone();
-        std::thread::spawn(move || {
-            let mut reason: Option<String> = None;
-            let mut check_errors = 0u32;
-            let mut warned = false;
-            let mut next_retry = Instant::now();
-            loop {
-                std::thread::sleep(Duration::from_millis(250));
-                let result = {
-                    let mut guard = match monitor.lock() { Ok(g) => g, Err(_) => break };
-                    if guard.generation != generation { break; }
-                    record_health(&mut reason, &mut check_errors, inspect_runtime(&mut guard));
-                    if reason.is_some() && Instant::now() >= next_retry { Some(stop_runtime(&mut guard)) } else { None }
-                };
-                if let Some(restore) = result {
-                    let description = reason.as_deref().unwrap_or("Ошибка proxy");
-                    match restore {
-                        Ok(()) => {
-                            let message = format!("{description}; настройки proxy восстановлены");
-                            append_log(&monitor_app, &message);
-                            let _ = monitor_app.emit("proxy-exited", message);
-                            break;
-                        },
-                        Err(e) => {
-                            if !warned {
-                                let message = format!("{description}. ОШИБКА восстановления proxy: {e}. Защита может отсутствовать; проверьте настройки Windows и повторите восстановление. Монитор продолжит попытки без намеренной перезаписи сторонних настроек.");
-                                append_log(&monitor_app, &message);
-                                let _ = monitor_app.emit("proxy-exited", message);
-                                warned = true;
-                            }
-                            next_retry = Instant::now() + Duration::from_secs(5);
-                        },
-                    }
-                }
-            }
-        });
+        spawn_monitor(app.clone(), state.0.clone(), generation);
+        spawn_health(app.clone(), state.0.clone(), generation);
     }
     result.map(|_| ())
 }
@@ -1232,7 +1326,7 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let _instance = match windows::one_instance() { Ok(v) => v, Err(e) => { windows::show_error(&e); return; } };
-    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 })))).invoke_handler(tauri::generate_handler![fetch_subscription, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
+    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![fetch_subscription, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }
@@ -1266,6 +1360,18 @@ fn main() {
     });
 }
 
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    #[test]
+    fn suspend_is_detected_by_the_clock_jump() {
+        // Wall clock 120 s ahead of the monotonic clock: the machine was asleep.
+        assert!(clock_jumped(Duration::from_secs(120), Duration::from_secs(5)));
+        // Normal scheduling jitter must not look like a suspend.
+        assert!(!clock_jumped(Duration::from_secs(6), Duration::from_secs(5)));
+        assert!(!clock_jumped(Duration::from_secs(25), Duration::from_secs(5)));
+    }
+}
 #[cfg(all(test, windows))]
 #[path = "../../tests/windows-native.rs"]
 mod windows_native_tests;

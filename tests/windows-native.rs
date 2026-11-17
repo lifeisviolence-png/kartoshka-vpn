@@ -67,7 +67,7 @@ fn baseline(case: usize) {
     assert_same_indicator("ProxyEnable", &windows::get("ProxyEnable").unwrap(), &dword(0));
     require_no_foreign_proxy(&capture_proxy().unwrap()).expect("baseline must pass the production conflict check");
 }
-fn empty_runtime() -> ProxyRuntime { ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0 } }
+fn empty_runtime() -> ProxyRuntime { ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None } }
 fn disposable_ci() -> bool {
     let yes = std::env::var("CI").as_deref() == Ok("true")
         && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
