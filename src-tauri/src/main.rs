@@ -5,6 +5,7 @@ mod doh;
 
 use std::{fs, io::Write, net::TcpStream as StdTcpStream, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime}};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 use tokio::{net::TcpStream, time::timeout};
 
@@ -33,7 +34,7 @@ struct LegacyValue { name: String, kind: String, value: String }
 struct ProxyRuntime { child: Option<Child>, watchdog: Option<Child>, snapshot_path: Option<PathBuf>, ports: Vec<u16>, generation: u64, config: Option<String> }
 struct ProxyState(Arc<Mutex<ProxyRuntime>>);
 #[derive(Serialize)]
-struct SubscriptionResponse { body: String, userinfo: Option<String> }
+struct SubscriptionResponse { body: String, userinfo: Option<String>, title: Option<String>, #[serde(rename = "supportUrl")] support_url: Option<String>, #[serde(rename = "homeUrl")] home_url: Option<String> }
 
 #[cfg(windows)]
 mod windows {
@@ -633,6 +634,114 @@ fn snapshot_path(app: &AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать папку настроек: {e}"))?;
     Ok(dir.join("proxy-snapshot.json"))
 }
+const SECURE_STATE_LIMIT: usize = 16 * 1024 * 1024;
+fn secure_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать папку настроек: {e}"))?;
+    Ok(dir.join("state.enc"))
+}
+// Subscription URLs, UUIDs and passwords never go to localStorage or a plain
+// file: the snapshot is encrypted with DPAPI (current Windows user) and only the
+// ciphertext is written. The plaintext text stays in memory and is never logged.
+#[tauri::command]
+fn load_secure_state(app: AppHandle) -> Result<Option<String>, String> {
+    let path = secure_state_path(&app)?;
+    if !path.exists() { return Ok(None); }
+    let bytes = fs::read(&path).map_err(|e| format!("Не удалось прочитать хранилище: {e}"))?;
+    if bytes.is_empty() { return Ok(None); }
+    let plain = if let Some(encrypted) = bytes.strip_prefix(b"KPV3-DPAPI\0") {
+        windows::unprotect(encrypted).map_err(|_| "state.locked".to_string())?
+    } else {
+        // A plaintext file is accepted once so an interrupted upgrade can finish,
+        // and is re-encrypted on the next save.
+        bytes
+    };
+    let text = String::from_utf8(plain).map_err(|_| "state.locked".to_string())?;
+    if text.len() > SECURE_STATE_LIMIT { return Err("Хранилище настроек повреждено".into()); }
+    Ok(Some(text))
+}
+#[tauri::command]
+fn save_secure_state(app: AppHandle, contents: String) -> Result<(), String> {
+    if contents.len() > SECURE_STATE_LIMIT { return Err("Состояние приложения слишком велико".into()); }
+    let root: serde_json::Value = serde_json::from_str(&contents).map_err(|_| "Состояние приложения повреждено".to_string())?;
+    if !root.is_object() { return Err("Состояние приложения повреждено".into()); }
+    let encrypted = windows::protect(contents.as_bytes()).map_err(|e| format!("Не удалось зашифровать настройки: {e}"))?;
+    let path = secure_state_path(&app)?;
+    let tmp = path.with_extension("enc.tmp");
+    let mut data = b"KPV3-DPAPI\0".to_vec();
+    data.extend_from_slice(&encrypted);
+    fs::write(&tmp, &data).map_err(|e| format!("Не удалось записать настройки: {e}"))?;
+    let _ = fs::remove_file(&path);
+    fs::rename(&tmp, &path).map_err(|e| format!("Не удалось заменить настройки: {e}"))?;
+    Ok(())
+}
+// A profile locked to another Windows user cannot be decrypted. The app offers
+// a fresh start instead of crashing; the old file is kept next to the new one.
+#[tauri::command]
+fn reset_secure_state(app: AppHandle) -> Result<(), String> {
+    let path = secure_state_path(&app)?;
+    if !path.exists() { return Ok(()); }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let backup = path.with_extension(format!("enc.locked-{stamp}"));
+    fs::rename(&path, &backup).map_err(|e| format!("Не удалось сохранить архив старого хранилища: {e}"))?;
+    Ok(())
+}
+
+// Closing the window hides it only when the user enabled that option in settings.
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<bool, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Не удалось определить путь приложения: {e}"))?;
+    let status = if enabled {
+        let value = format!("\"{}\" --minimized", exe.display());
+        std::process::Command::new("reg")
+            .args(["add", AUTOSTART_KEY, "/v", "KartoshkaVPN", "/t", "REG_SZ", "/d", &value, "/f"])
+            .status()
+    } else {
+        std::process::Command::new("reg")
+            .args(["delete", AUTOSTART_KEY, "/v", "KartoshkaVPN", "/f"])
+            .status()
+    };
+    let status = status.map_err(|e| format!("Не удалось изменить автозапуск: {e}"))?;
+    if enabled && !status.success() { return Err("Windows отклонила запись автозапуска".into()); }
+    Ok(enabled)
+}
+#[tauri::command]
+fn autostart_enabled() -> bool {
+    std::process::Command::new("reg")
+        .args(["query", AUTOSTART_KEY, "/v", "KartoshkaVPN"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+#[tauri::command]
+fn set_close_to_tray(enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, Ordering::Relaxed);
+}
+#[tauri::command]
+fn set_tray_active(app: AppHandle, active: bool) -> Result<(), String> {
+    let bytes: &[u8] = if active { include_bytes!("../icons/tray-active.png") } else { include_bytes!("../icons/tray-idle.png") };
+    let image = tauri::image::Image::from_bytes(bytes).map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id("main") { tray.set_icon(Some(image)).map_err(|e| e.to_string())?; }
+    Ok(())
+}
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !url.starts_with("https://") || url.len() > 2048 || url.chars().any(|c| c.is_control() || c == '"') {
+        return Err("Разрешены только https-ссылки".into());
+    }
+    #[cfg(windows)]
+    let result = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(not(windows))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    result.map(|_| ()).map_err(|e| format!("Не удалось открыть ссылку: {e}"))
+}
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
 fn append_log(app: &AppHandle, message: &str) {
     if let Ok(dir) = app.path().app_config_dir() {
         let _ = fs::create_dir_all(&dir);
@@ -1058,7 +1167,7 @@ fn xray_path() -> Result<PathBuf, String> {
 #[tauri::command]
 async fn fetch_subscription(url: String, protect_dns: Option<bool>) -> Result<SubscriptionResponse, String> {
     let trimmed = url.trim().to_string();
-    if ["vless://", "vmess://", "trojan://", "ss://", "hysteria2://"].iter().any(|p| trimmed.starts_with(p)) { return Ok(SubscriptionResponse { body: trimmed, userinfo: None }); }
+    if ["vless://", "vmess://", "trojan://", "ss://", "hysteria2://"].iter().any(|p| trimmed.starts_with(p)) { return Ok(SubscriptionResponse { body: trimmed, userinfo: None, title: None, support_url: None, home_url: None }); }
     if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) { return Err("Ссылка должна начинаться с http:// или https://".into()); }
     let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30)).user_agent("KartoshkaVPN/0.9.4").redirect(reqwest::redirect::Policy::limited(5));
     // With DNS protection the panel host is resolved over DoH; reqwest keeps the
@@ -1075,9 +1184,20 @@ async fn fetch_subscription(url: String, protect_dns: Option<bool>) -> Result<Su
         }
     }
     let response = builder.build().map_err(|e| e.to_string())?.get(trimmed).header("Accept", "text/plain, text/*, */*").send().await.map_err(|e| format!("Не удалось открыть подписку: {}", e.without_url()))?.error_for_status().map_err(|e| format!("Сервер подписки вернул ошибку: {}", e.without_url()))?;
-    let userinfo = response.headers().get("subscription-userinfo").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let userinfo = header("subscription-userinfo");
+    // Panels publish these headers; a base64: prefix is decoded when it is valid UTF-8.
+    let title = header("profile-title").map(|value| {
+        value.strip_prefix("base64:").and_then(|encoded| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok().and_then(|bytes| String::from_utf8(bytes).ok())
+        }).unwrap_or(value)
+    });
+    let https_only = |value: Option<String>| value.filter(|url| url.starts_with("https://") && url.len() <= 2048 && !url.chars().any(|c| c.is_control()));
+    let support_url = https_only(header("support-url"));
+    let home_url = https_only(header("profile-web-page-url"));
     let body = response.text().await.map_err(|e| format!("Не удалось прочитать подписку: {}", e.without_url()))?;
-    Ok(SubscriptionResponse { body, userinfo })
+    Ok(SubscriptionResponse { body, userinfo, title, support_url, home_url })
 }
 #[tauri::command]
 async fn resolve_host(name: String) -> Result<doh::Resolution, String> {
@@ -1355,7 +1475,7 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let _instance = match windows::one_instance() { Ok(v) => v, Err(e) => { windows::show_error(&e); return; } };
-    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![fetch_subscription, resolve_host, dns_check, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
+    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![open_external, set_autostart, autostart_enabled, set_close_to_tray, set_tray_active, quit_app, load_secure_state, save_secure_state, reset_secure_state, fetch_subscription, resolve_host, dns_check, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }
@@ -1368,6 +1488,49 @@ fn main() {
                 append_log(handle, &format!("ОШИБКА восстановления proxy: {e}; запуск соединения заблокирован"));
                 windows::show_error(&format!("Не удалось восстановить системный proxy: {e}\n\nПодключение заблокировано. Проверьте настройки Windows вручную и не меняйте настройки другого VPN без проверки. Если snapshot существует, он сохранён."));
             },
+        }
+        let open = tauri::menu::MenuItem::with_id(app, "open", "Открыть", true, None::<&str>)?;
+        let toggle = tauri::menu::MenuItem::with_id(app, "toggle", "Подключить / Отключить", true, None::<&str>)?;
+        let quit = tauri::menu::MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+        let menu = tauri::menu::Menu::with_items(app, &[&open, &toggle, &quit])?;
+        let icon = app.default_window_icon().cloned().ok_or("В приложении нет иконки окна")?;
+        tauri::tray::TrayIconBuilder::with_id("main")
+            .icon(icon)
+            .tooltip("КартошкаVPN")
+            .menu(&menu)
+            .show_menu_on_left_click(false)
+            .on_menu_event(|app, event| match event.id.as_ref() {
+                "open" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                "toggle" => { let _ = app.emit("tray-toggle", ()); }
+                "quit" => { let _ = app.emit("tray-quit", ()); }
+                _ => {}
+            })
+            .on_tray_icon_event(|tray, event| {
+                if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, button_state: tauri::tray::MouseButtonState::Up, .. } = event {
+                    let app = tray.app_handle();
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            })
+            .build(app)?;
+        if let Some(window) = app.get_webview_window("main") {
+            let handle = window.clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if CLOSE_TO_TRAY.load(Ordering::Relaxed) {
+                        api.prevent_close();
+                        let _ = handle.hide();
+                    }
+                }
+            });
+            if std::env::args().any(|arg| arg == "--minimized") { let _ = window.hide(); }
         }
         Ok(())
     }).build(tauri::generate_context!()).expect("ошибка запуска КартошкаVPN").run(|app, event| {

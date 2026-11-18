@@ -16,6 +16,56 @@ export const desktopBridge = {
     await invoke('stop_proxy');
     return { ok: true, native: true };
   },
+  // The snapshot lives in %APPDATA%\ru.kartoshka.vpn\state.enc and is encrypted
+  // with DPAPI. A preview has no DPAPI and keeps localStorage instead.
+  async loadSecureState() {
+    if (!isDesktop) return null;
+    return invoke('load_secure_state');
+  },
+  async saveSecureState(contents) {
+    if (!isDesktop) return { ok: false, preview: true };
+    await invoke('save_secure_state', { contents: String(contents) });
+    return { ok: true };
+  },
+  async resetSecureState() {
+    if (!isDesktop) return { ok: false, preview: true };
+    await invoke('reset_secure_state');
+    return { ok: true, native: true };
+  },
+  async setAutostart(enabled) {
+    if (!isDesktop) return { ok: false, preview: true };
+    await invoke('set_autostart', { enabled: Boolean(enabled) });
+    return { ok: true };
+  },
+  async autostartEnabled() {
+    if (!isDesktop) return false;
+    return invoke('autostart_enabled');
+  },
+  async setCloseToTray(enabled) {
+    if (!isDesktop) return { ok: false, preview: true };
+    await invoke('set_close_to_tray', { enabled: Boolean(enabled) });
+    return { ok: true };
+  },
+  async setTrayActive(active) {
+    if (!isDesktop) return { ok: false, preview: true };
+    await invoke('set_tray_active', { active: Boolean(active) });
+    return { ok: true };
+  },
+  async quitApp() {
+    if (!isDesktop) return { ok: false, preview: true };
+    await invoke('quit_app');
+    return { ok: true };
+  },
+  async openExternal(url) {
+    if (!isDesktop) { window.open(url, '_blank', 'noopener'); return { ok: true, preview: true }; }
+    await invoke('open_external', { url: String(url) });
+    return { ok: true };
+  },
+  async watchTray({ onToggle, onQuit }) {
+    if (!isDesktop) return;
+    await listen('tray-toggle', () => onToggle?.());
+    await listen('tray-quit', () => onQuit?.());
+  },
   async fetchSubscription(url, protectDns = false) {
     if (directScheme.test(url)) return { body: url, userinfo: null };
     if (isDesktop) return invoke('fetch_subscription', { url, protectDns: Boolean(protectDns) });

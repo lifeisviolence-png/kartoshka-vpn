@@ -642,3 +642,11 @@ fn windows_watchdog_crashes_conflict_and_dpapi() {
     }
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn dpapi_roundtrip_for_current_user() {
+    let secret = b"https://panel.example/sub/secret-token";
+    let encrypted = windows::protect(secret).expect("DPAPI protect");
+    assert_ne!(encrypted, secret);
+    assert_eq!(windows::unprotect(&encrypted).expect("DPAPI unprotect"), secret);
+}

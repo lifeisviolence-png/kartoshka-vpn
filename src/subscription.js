@@ -191,11 +191,46 @@ function parseVmess(raw, index) {
   if ((!data.tls || data.tls === 'none') && (data.sni || data.alpn || data.fp)) issue('sub.tlsWithoutTls');
   return makeNode(data.ps, o, index, 'VMess');
 }
+
+// Hysteria writes port hopping as "host:20000-30000", "host:443,8443" or in the
+// mport query parameter. WHATWG URL cannot parse such an authority, so the spec
+// is read before parsing and replaced with one port. Xray-core 26.10.31 accepts
+// only a single Hysteria port (checked with `xray run -test`), therefore a
+// multi-port link stays visible but is marked unsupported with a clear reason.
+function portSpecFromUri(raw) {
+  const queryPart = raw.split('?')[1]?.split('#')[0] || '';
+  const mport = new URLSearchParams(queryPart).get('mport');
+  if (mport) return { spec: mport, source: 'mport' };
+  const authority = /^[a-z0-9+.-]+:\/\/(?:[^@/?#]*@)?(\[[^\]]+\]|[^:/?#]+):([^/?#]+)/i.exec(raw);
+  if (!authority) return null;
+  const port = authority[2];
+  if (!/[,-]/.test(port)) return null;
+  return { spec: port, source: 'authority' };
+}
+export function parsePortSpec(spec) {
+  const parts = String(spec).split(',').map((part) => part.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  let count = 0, first = null, last = null;
+  for (const part of parts) {
+    const match = /^(\d{1,5})(?:-(\d{1,5}))?$/.exec(part);
+    if (!match) return null;
+    const from = Number(match[1]), to = match[2] ? Number(match[2]) : from;
+    if (from < 1 || to > 65535 || to < from) return null;
+    if (first === null) first = from;
+    last = to;
+    count += to - from + 1;
+  }
+  return { count, first, last, single: count === 1 ? first : null };
+}
 function parseHysteria(raw, index) {
+  // A hopping link is parsed as if it had one port; the full spec is kept for
+  // diagnostics and for the unsupported explanation.
+  const hopping = portSpecFromUri(raw);
+  const ports = hopping ? parsePortSpec(hopping.spec) : null;
+  let prepared = raw;
+  if (hopping && ports) prepared = raw.replace(new RegExp(`:${hopping.spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[/?#])`), `:${ports.first}`);
   let url;
-  try { url = parseUrl(raw); } catch {
-    // In particular, WHATWG URL cannot parse Hysteria's multi-port hopping syntax.
-    // Keep the original securely in node storage instead of presenting a fake endpoint.
+  try { url = parseUrl(prepared); } catch {
     const node = makeNode(`Hysteria2 ${index + 1}`, { type: 'hysteria2', server: '', server_port: null }, index, 'Hysteria2');
     node.unsupported = true; node.supported = false;
     node.code = 'sub.hy2PortHopping';
@@ -203,9 +238,21 @@ function parseHysteria(raw, index) {
     node.originalUri = raw;
     return node;
   }
+  if (hopping && ports && ports.count > 1) {
+    const host = hostOf(url);
+    const node = makeNode(`Hysteria2 ${index + 1}`, { type: 'hysteria2', server: host, server_port: ports.first }, index, 'Hysteria2');
+    node.unsupported = true; node.supported = false;
+    node.code = 'sub.hy2PortHopping';
+    node.unsupportedReason = 'sub.hy2PortHopping';
+    node.params = { spec: hopping.spec, count: ports.count, first: ports.first };
+    node.portHopping = { spec: hopping.spec, count: ports.count, first: ports.first, last: ports.last, source: hopping.source };
+    node.originalUri = raw;
+    return node;
+  }
   const name = cleanName(decoded(url.hash.slice(1)), `Hysteria2 ${index + 1}`);
-  const o = { type: 'hysteria2', server: hostOf(url), server_port: Number(url.port || 443), password: decoded(url.username) + (url.password ? `:${decoded(url.password)}` : ''), tls: { enabled: true, server_name: hostOf(url) }, ...(url.searchParams.get('up') ? { up: url.searchParams.get('up') } : {}), ...(url.searchParams.get('down') ? { down: url.searchParams.get('down') } : {}), ...(url.searchParams.get('congestion') ? { congestion: url.searchParams.get('congestion') } : {}) };
+  const o = { type: 'hysteria2', server: hostOf(url), server_port: Number(url.port || 443), password: decoded(url.username) + (url.password ? `:${decoded(url.password)}` : ''), ...(ports?.single ? { server_port: ports.single } : {}), tls: { enabled: true, server_name: hostOf(url) }, ...(url.searchParams.get('up') ? { up: url.searchParams.get('up') } : {}), ...(url.searchParams.get('down') ? { down: url.searchParams.get('down') } : {}), ...(url.searchParams.get('congestion') ? { congestion: url.searchParams.get('congestion') } : {}) };
   const node = makeNode(name, o, index, 'Hysteria2');
+  node.originalUri = raw;
   try {
     const p = query(url, ['sni', 'insecure', 'obfs', 'obfs-password', 'pinSHA256', 'ech', 'up', 'down', 'congestion']);
     if (url.pathname && url.pathname !== '/') issue('sub.unexpectedPath');

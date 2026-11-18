@@ -6,6 +6,7 @@ import { t, setLanguage, getLanguage, locale, errorText as localizedError } from
 import { VERSION } from './version.js';
 import { icon } from './icons.js';
 import { countryByCode, countryLabel, flagPath, detectCountry, groupByCountry } from './countries.js';
+import { scrubLegacyStorage, legacyKeysPresent } from './secure-store.js';
 import { migrateState, snapshot, subscriptionIdFor, subscriptionNameFor, mergeSubscriptionNodes, removeSubscription, restoreSubscription, nodeEndpoint, mergeKey } from './state-model.js';
 
 const capabilities = desktopBridge.getCapabilities();
@@ -85,8 +86,8 @@ setLanguage(state.language);
 if (!state.selectedId || !state.servers.some((node) => node.id === state.selectedId)) state.selectedId = state.servers[0]?.id || null;
 state.servers = state.servers.map(applyCountry);
 
-if (loaded.migrated) {
-  // The legacy keys are left untouched: a failed migration must never destroy data.
+// The browser preview has no DPAPI: it persists the migrated snapshot in localStorage.
+if (!capabilities.native && loaded.migrated) {
   try { localStorage.setItem(storageKey, JSON.stringify(persisted())); }
   catch { state.notice = { type: 'error', text: t('notice.saveFailedLegacy') }; }
 }
@@ -100,17 +101,90 @@ let renderTimer = null;
 let latencyTimer = null;
 
 function persisted() { return snapshot({ ...state, nodes: state.servers }); }
-function commitData(patch) {
-  const next = { ...state, ...patch };
-  try { localStorage.setItem(storageKey, JSON.stringify(snapshot({ ...next, nodes: next.servers }))); }
-  catch {
-    state.notice = { type: 'error', text: t('notice.saveFailed') };
-    return false;
+const NATIVE = capabilities.native;
+let persistTimer = null;
+let storageLocked = false;
+function snapshotText() { return JSON.stringify(persisted()); }
+// A desktop snapshot is written only through Rust: DPAPI ciphertext in
+// %APPDATA%\ru.kartoshka.vpn\state.enc. localStorage is used by the browser
+// preview, and clears itself after a successful encrypted save.
+async function saveSnapshotNow() {
+  if (!NATIVE) {
+    try { localStorage.setItem(storageKey, snapshotText()); }
+    catch { state.notice = { type: 'error', text: t('notice.saveFailed') }; }
+    return;
   }
+  if (storageLocked) return;
+  try {
+    const saved = await desktopBridge.saveSecureState(snapshotText());
+    if (saved?.preview) { localStorage.setItem(storageKey, snapshotText()); return; }
+    if (legacyKeysLeft()) scrubLegacyStorage(localStorage);
+  } catch {
+    state.notice = { type: 'error', text: t('notice.saveFailed') };
+  }
+}
+function legacyKeysLeft() {
+  try { return Boolean(localStorage.length); } catch { return false; }
+}
+function schedulePersist() {
+  if (!NATIVE) { saveSnapshotNow(); return; }
+  // Small snapshots are written immediately: a debounce only risks losing the
+  // last change if the process is closed right after it.
+  void saveSnapshotNow();
+}
+function commitData(patch) {
   Object.assign(state, patch);
+  schedulePersist();
   return true;
 }
+async function resetSecureStorage() {
+  if (!NATIVE) return;
+  try {
+    await desktopBridge.resetSecureState();
+  } catch {
+    state.notice = { type: 'error', text: t('notice.storageResetFailed') };
+    render();
+    return;
+  }
+  storageLocked = false;
+  state.servers = [];
+  state.selectedId = null;
+  state.subscriptionUrl = '';
+  state.subscriptionMeta = null;
+  state.notice = { type: 'info', text: t('notice.storageReset') };
+  await saveSnapshotNow();
+  render();
+}
+async function bootstrapSecureStorage() {
+  if (!NATIVE) return;
+  try {
+    const text = await desktopBridge.loadSecureState();
+    if (text) {
+      const next = migrateState(JSON.parse(text)).state;
+      const nodes = next.nodes.map(applyCountry);
+      Object.assign(state, next, { servers: nodes });
+      setLanguage(state.language);
+      if (!state.selectedId || !state.servers.some((node) => node.id === state.selectedId)) state.selectedId = state.servers[0]?.id || null;
+    }
+    // An empty install must not create an empty store; a fresh save would only
+    // race the first real change.
+    if (text || legacyKeysPresent(localStorage).length) await saveSnapshotNow();
+    scrubLegacyStorage(localStorage);
+  } catch (error) {
+    if (String(error?.message || error).includes('state.locked')) {
+      storageLocked = true;
+      state.notice = { type: 'error', text: t('notice.storageLocked'), action: 'reset-storage' };
+    } else {
+      state.notice = { type: 'error', text: t('notice.storageReadFailed') };
+    }
+  }
+  render();
+}
 function selectedNode() { return state.servers.find((node) => node.id === state.selectedId) || null; }
+function httpsLink(value) {
+  if (!value) return '';
+  try { const url = new URL(String(value)); return url.protocol === 'https:' ? url.toString() : ''; } catch { return ''; }
+}
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char])); }
 function errorText(error) {
   const text = localizedError(error);
@@ -267,7 +341,11 @@ function navItem(id, iconName, label) {
 function renderNotice() {
   if (!state.notice) return '';
   const details = state.notice.details?.length ? `<ul>${state.notice.details.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '';
-  const action = state.notice.action === 'reconnect' ? `<button class="button small" data-action="reconnect">${escapeHtml(t('action.reconnect'))}</button>` : '';
+  const action = state.notice.action === 'reconnect'
+    ? `<button class="button small" data-action="reconnect">${escapeHtml(t('action.reconnect'))}</button>`
+    : state.notice.action === 'reset-storage'
+      ? `<button class="button small" data-action="reset-storage">${escapeHtml(t('action.resetStorage'))}</button>`
+      : '';
   return `<div class="notice ${state.notice.type === 'error' ? 'notice-error' : ''}" role="status"><div>${escapeHtml(state.notice.text)}${details}</div>${action}<button class="icon-button" data-action="dismiss-notice" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 14)}</button></div>`;
 }
 function toastMarkup() {
@@ -511,7 +589,7 @@ function subscriptionCard(item) {
   return `<div class="sub-card">
     <div class="sub-icon">${icon('link', 15)}</div>
     <div class="sub-copy"><strong>${escapeHtml(item.name)}</strong><span class="muted small">${escapeHtml(t('servers.subServers', { count }))} · ${escapeHtml(t('servers.subUpdated', { date: formatDate(item.updatedAt) }))}</span>${usage === null ? '' : `<div class="usage"><div class="usage-track"><i style="width:${usage}%"></i></div><span class="muted small">${escapeHtml(formatBytes(item.meta.used))} / ${escapeHtml(formatBytes(item.meta.total))}</span></div>`}</div>
-    <div class="sub-actions"><button class="icon-button" data-action="refresh-sub" data-id="${escapeHtml(item.id)}" title="${escapeHtml(t('servers.refreshSub'))}" aria-label="${escapeHtml(t('servers.refreshSub'))}" ${busyThis ? 'disabled' : ''}>${busyThis ? '<span class="spinner"></span>' : icon('refresh', 15)}</button><button class="icon-button danger" data-action="ask-delete-sub" data-id="${escapeHtml(item.id)}" title="${escapeHtml(t('servers.deleteSub'))}" aria-label="${escapeHtml(t('servers.deleteSub'))}" ${busyThis ? 'disabled' : ''}>${icon('trash', 15)}</button></div>
+    <div class="sub-actions">${item.meta?.supportUrl ? `<button class="button small" data-action="open-link" data-url="${escapeHtml(item.meta.supportUrl)}">${escapeHtml(t('subscription.support'))}</button>` : ''}${item.meta?.homeUrl ? `<button class="button small" data-action="open-link" data-url="${escapeHtml(item.meta.homeUrl)}">${escapeHtml(t('subscription.account'))}</button>` : ''}<button class="icon-button" data-action="refresh-sub" data-id="${escapeHtml(item.id)}" title="${escapeHtml(t('servers.refreshSub'))}" aria-label="${escapeHtml(t('servers.refreshSub'))}" ${busyThis ? 'disabled' : ''}>${busyThis ? '<span class="spinner"></span>' : icon('refresh', 15)}</button><button class="icon-button danger" data-action="ask-delete-sub" data-id="${escapeHtml(item.id)}" title="${escapeHtml(t('servers.deleteSub'))}" aria-label="${escapeHtml(t('servers.deleteSub'))}" ${busyThis ? 'disabled' : ''}>${icon('trash', 15)}</button></div>
   </div>`;
 }
 
@@ -580,9 +658,11 @@ function settingsMarkup() {
       <div class="setting"><div><strong>${escapeHtml(t('settings.storage'))}</strong><small>${escapeHtml(t('settings.storageHint', { count: state.servers.length, subs: state.subscriptions.length }))}</small></div><button class="button small danger" data-action="clear-data">${icon('trash', 14)}${escapeHtml(t('settings.clearData'))}</button></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.version'))}</strong><small>${escapeHtml(t('settings.versionHint'))}</small></div><span class="mono">${escapeHtml(VERSION)}</span></div>
     </div>
-    <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.unavailableTitle'))}</span></div>
-      <div class="setting muted"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
-      <div class="setting muted"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
+    <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.automation'))}</span></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.autostart'))}</strong><small>${escapeHtml(t('settings.autostartHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-autostart" ${state.settings?.autostart ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.autoconnect'))}</strong><small>${escapeHtml(t('settings.autoconnectHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-autoconnect" ${state.settings?.autoconnect ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.closeToTray'))}</strong><small>${escapeHtml(t('settings.closeToTrayHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-close-to-tray" ${state.settings?.closeToTray ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.autoUpdate'))}</strong><small>${escapeHtml(t('settings.autoUpdateHint'))}</small></div><select id="auto-update-hours" aria-label="${escapeHtml(t('settings.autoUpdate'))}">${[[0, 'off'], [6, '6'], [12, '12'], [24, '24']].map(([value, key]) => `<option value="${value}" ${Number(state.settings?.autoUpdateHours ?? 12) === value ? 'selected' : ''}>${escapeHtml(t(`settings.autoUpdate.${key}`))}</option>`).join('')}</select></div>
       <div class="setting"><div><strong>${escapeHtml(t('home.dnsProtection'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.desc`))}</small><small class="muted">${escapeHtml(t('home.dnsProtectionInfo'))}</small>${state.dnsCheck ? `<small class="${state.dnsCheck.ok ? '' : 'warn'}">${escapeHtml(t(state.dnsCheck.ok ? 'settings.dnsCheckOk' : 'settings.dnsCheckFail', { server: state.dnsCheck.server || '', ip: state.dnsCheck.ip || '' }))}</small>${state.dnsCheck.ok ? `<small class="muted">${escapeHtml(t('settings.dnsCheckPath', { path: t(`settings.dnsVia.${state.dnsCheck.via || 'bootstrap-ip'}`, { ip: state.dnsCheck.ip || '' }) }))}</small>` : ''}` : ''}</div><div class="row-actions"><button class="button small" id="dns-check" ${state.dnsCheck?.running ? 'disabled' : ''}>${escapeHtml(t('settings.checkDns'))}</button><label class="switch"><input type="checkbox" id="settings-dns-protection" data-toggle="dns-protection" aria-label="${escapeHtml(t('home.dnsProtection'))}" ${dnsMode === 'builtin' ? 'checked' : ''}/><span></span></label></div></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.failover'))}</strong></div><select id="failover-mode" aria-label="${escapeHtml(t('settings.failover'))}">${['country', 'any', 'never'].map((id) => `<option value="${id}" ${id === (state.settings?.failover || 'country') ? 'selected' : ''}>${escapeHtml(t(`settings.failoverMode.${id}`))}</option>`).join('')}</select></div>
     </div>
@@ -674,6 +754,7 @@ function bindEvents() {
   document.querySelectorAll('[data-action="close-result"]').forEach((button) => button.addEventListener('click', () => { state.pendingImport = null; state.modal = null; render(); }));
   document.querySelector('[data-action="apply-import"]')?.addEventListener('click', () => applyPendingImport());
   document.querySelectorAll('[data-action="dismiss-notice"]').forEach((button) => button.addEventListener('click', () => { state.notice = null; render(); }));
+  document.querySelectorAll('[data-action="reset-storage"]').forEach((button) => button.addEventListener('click', resetSecureStorage));
   document.querySelectorAll('[data-toggle]').forEach((input) => input.addEventListener('change', () => {
     if (input.dataset.toggle === 'dns-protection') setDnsProtection(input.checked); else setFastReconnect(input.checked);
   }));
@@ -691,6 +772,12 @@ function bindEvents() {
     else { state.pendingUrl = ''; state.importError = ''; state.modal = 'add'; render(); }
   }));
   document.querySelectorAll('[data-action="refresh-all"]').forEach((button) => button.addEventListener('click', () => refreshAll()));
+  document.querySelectorAll('[data-action="open-link"]').forEach((button) => button.addEventListener('click', async () => {
+    const url = httpsLink(button.dataset.url);
+    if (!url) return;
+    try { await desktopBridge.openExternal(url); }
+    catch (error) { state.notice = { type: 'error', text: errorText(error) }; render(); }
+  }));
   document.querySelectorAll('[data-action="refresh-sub"]').forEach((button) => button.addEventListener('click', () => refreshSubscription(button.dataset.id)));
   document.querySelectorAll('[data-action="ask-delete-sub"]').forEach((button) => button.addEventListener('click', () => { state.pendingDelete = state.subscriptions.find((item) => item.id === button.dataset.id) || null; state.modal = 'delete-sub'; render(); }));
   document.querySelectorAll('[data-action="close-delete"]').forEach((button) => button.addEventListener('click', () => { state.pendingDelete = null; state.modal = null; render(); }));
@@ -729,6 +816,28 @@ function bindEvents() {
   });
   document.querySelector('#failover-mode')?.addEventListener('change', (event) => {
     if (['country', 'any', 'never'].includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), failover: event.target.value } }); render(); }
+  });
+  document.querySelector('#settings-autostart')?.addEventListener('change', async (event) => {
+    const autostart = Boolean(event.target.checked);
+    commitData({ settings: { ...(state.settings || {}), autostart } });
+    try { await desktopBridge.setAutostart(autostart); }
+    catch (error) { state.notice = { type: 'error', text: errorText(error) }; }
+    render();
+  });
+  document.querySelector('#settings-autoconnect')?.addEventListener('change', (event) => {
+    commitData({ settings: { ...(state.settings || {}), autoconnect: Boolean(event.target.checked) } }); render();
+  });
+  document.querySelector('#settings-close-to-tray')?.addEventListener('change', async (event) => {
+    const closeToTray = Boolean(event.target.checked);
+    commitData({ settings: { ...(state.settings || {}), closeToTray } });
+    try { await desktopBridge.setCloseToTray(closeToTray); } catch { /* preview */ }
+    render();
+  });
+  document.querySelector('#auto-update-hours')?.addEventListener('change', (event) => {
+    const hours = Math.max(0, Math.min(168, Number(event.target.value) || 0));
+    commitData({ settings: { ...(state.settings || {}), autoUpdateHours: hours } });
+    scheduleAutoUpdate();
+    render();
   });
   document.querySelector('#language')?.addEventListener('change', (event) => {
     const language = event.target.value === 'en' ? 'en' : 'ru';
@@ -802,7 +911,7 @@ async function prepareImport(value) {
     }
     return { nodes: [], errors: errors.length ? errors : [{ key: 'err.noServers' }], warnings, total: 0, isSubscription, routing, url: text, meta: null };
   }
-  return { nodes: parsed.nodes, errors, warnings, total: parsed.nodes.length + errors.length, isSubscription, routing, url: text, meta: isSubscription ? parseUserinfo(response.userinfo) : null, format: parsed.format, title: parsed.title || '' };
+  return { nodes: parsed.nodes, errors, warnings, total: parsed.nodes.length + errors.length, isSubscription, routing, url: text, meta: isSubscription ? { ...parseUserinfo(response.userinfo), title: response.title || '', supportUrl: httpsLink(response.supportUrl), homeUrl: httpsLink(response.homeUrl) } : null, format: parsed.format, title: parsed.title || '' };
 }
 
 function nextNodeId(base, used) {
@@ -1130,7 +1239,7 @@ async function stopProxy() {
 async function stopCurrent(messageKey = 'state.restoringProxy') {
   state.connection = 'disconnecting'; setMessage(messageKey); render();
   try {
-    await stopProxy(); resetSession(); state.cleanupNeeded = false; return true;
+    await stopProxy(); resetSession(); state.cleanupNeeded = false; syncTray(); return true;
   } catch (error) {
     resetSession(); state.cleanupNeeded = true; state.connection = 'error';
     setMessage('state.restoreFailed', { error: errorText(error) }); render(); return false;
@@ -1151,6 +1260,51 @@ function autoPool(selected) {
   return [selected, ...(favorites.length ? favorites : sameCountry).slice(0, 5)];
 }
 
+
+let autoUpdateTimer = null;
+let lastTrayActive = null;
+function syncTray() {
+  if (!NATIVE) return;
+  const active = state.connection === 'connected';
+  if (active === lastTrayActive) return;
+  lastTrayActive = active;
+  try { const pending = desktopBridge.setTrayActive?.(active); pending?.catch?.(() => {}); } catch { /* preview */ }
+}
+async function initAutomation() {
+  if (!NATIVE) return;
+  DesktopSettings.apply();
+  scheduleAutoUpdate();
+  if (state.settings?.autoconnect && selectedNode() && state.bridgeReady && state.connection === 'idle') {
+    setTimeout(() => { if (state.connection === 'idle' && selectedNode()) toggleConnection(); }, 1500);
+  }
+}
+const DesktopSettings = {
+  apply() {
+    try { const pending = desktopBridge.setCloseToTray?.(Boolean(state.settings?.closeToTray)); pending?.catch?.(() => {}); } catch { /* preview */ }
+  }
+};
+function scheduleAutoUpdate() {
+  if (autoUpdateTimer) { clearInterval(autoUpdateTimer); autoUpdateTimer = null; }
+  const hours = Number(state.settings?.autoUpdateHours ?? 12);
+  if (!NATIVE || !hours) return;
+  autoUpdateTimer = setInterval(() => { void maybeAutoUpdate(); }, 30 * 60 * 1000);
+  setTimeout(() => { void maybeAutoUpdate(); }, 5000);
+}
+async function maybeAutoUpdate() {
+  const hours = Number(state.settings?.autoUpdateHours ?? 12);
+  if (!hours || state.refreshAllBusy || busy() || !state.subscriptions.length) return;
+  const last = Number(state.settings?.lastAutoUpdateAt || 0);
+  if (Date.now() - last < hours * 3600 * 1000) return;
+  appendLocalLog(t('logs.autoUpdateStart'));
+  try {
+    await refreshAll();
+    appendLocalLog(t('logs.autoUpdateDone'));
+  } catch (error) {
+    // A network failure keeps the imported list: refreshAll only replaces data on success.
+    appendLocalLog(t('logs.autoUpdateFailed', { error: errorText(error) }));
+  }
+  commitData({ settings: { ...(state.settings || {}), lastAutoUpdateAt: Date.now() } });
+}
 async function startSelected(node) {
   if (!node || unsupportedReason(node)) return;
   if (!capabilities.native || !state.bridgeReady || state.cleanupNeeded) {
@@ -1174,7 +1328,7 @@ async function startSelected(node) {
     const ip = await desktopBridge.probeInternet();
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringProbe'), { code: 'xrayExitedDuringProbe' });
     if (!ip) throw Object.assign(new Error('probeEmpty'), { code: 'probeEmpty' });
-    state.activeNode = snapshotNode; state.activeRouteMode = route; state.externalIp = ip; state.connectedAt = Date.now(); state.connection = 'connected'; setMessage('state.established'); sessionSequence += 1; render();
+    state.activeNode = snapshotNode; state.activeRouteMode = route; state.externalIp = ip; state.connectedAt = Date.now(); state.connection = 'connected'; setMessage('state.established'); sessionSequence += 1; render(); syncTray();
     void pingProxy();
     latencyTimer = setInterval(() => { if (state.connection === 'connected' && !state.proxyTesting) void pingProxy(); }, 15000);
   } catch (error) {
@@ -1333,10 +1487,12 @@ function handleProxyExit(message) {
 }
 
 render();
+bootstrapSecureStorage();
 void (async () => {
   let watchError = '';
   try { await desktopBridge.watchProxyExit(handleProxyExit); } catch (error) { watchError = errorText(error); }
   try { await desktopBridge.watchHealth(handleHealth); } catch { /* события доступны только в настольной сборке */ }
+  try { await desktopBridge.watchTray({ onToggle: () => { void toggleConnection(); }, onQuit: () => { void desktopBridge.quitApp(); } }); } catch { /* трей только в настольной сборке */ }
   state.watchError = watchError;
   if (!capabilities.native) { state.bridgeReady = !watchError; if (watchError) { state.connection = 'error'; setMessage('state.watchFailed', { error: watchError }); } setMessage('state.previewNoConnect'); render(); return; }
   // The bridge has no status query. On a frontend reload, stop any surviving session before
