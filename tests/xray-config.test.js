@@ -256,11 +256,20 @@ test('DNS: system не добавляет резолвер, builtin включа
   assert.equal(builtin.routing.domainStrategy, 'IPIfNonMatch');
   assert.equal(builtin.dns.disableCache, false);
   assert.equal(builtin.dns.queryStrategy, 'UseIPv4');
-  // DoH only: a plain UDP resolver would let the provider read every name.
-  assert.ok(builtin.dns.servers.every((server) => String(server.address).startsWith('https://')));
-  assert.ok(builtin.dns.servers.every((server) => !/:53\b/.test(String(server.address))));
-  assert.ok(builtin.dns.servers.some((server) => server.address === 'https://common.dot.dns.yandex.net/dns-query' && server.domains.includes('domain:ru')));
-  assert.ok(builtin.dns.servers.some((server) => server.address === 'https://cloudflare-dns.com/dns-query'));
+  // DoH only, and every address is a literal IP: no DoH hostname can reach the
+  // system resolver. A plain UDP resolver would let the provider read every name.
+  assert.equal(builtin.dns.tag, 'dns-query');
+  const urls = builtin.dns.servers.map((server) => String(server.address));
+  assert.ok(urls.every((url) => url.startsWith('https://')));
+  assert.ok(urls.every((url) => !/:53\b/.test(url)));
+  for (const url of urls) {
+    const host = new URL(url).hostname;
+    assert.ok(/^(?:\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]+$/i.test(host), `${url} must use an IP, not a name`);
+  }
+  assert.ok(builtin.dns.servers.some((server) => String(server.address).startsWith('https://77.88.8.8/') && server.domains.includes('domain:ru')));
+  assert.ok(urls.includes('https://1.1.1.1/dns-query'));
+  // Built-in queries are matched by tag and sent through the proxy outbound.
+  assert.deepEqual(builtin.routing.rules[0], { type: 'field', inboundTag: ['dns-query'], outboundTag: 'proxy' });
   // Unknown values must not silently disable resolution for rules.
   const fallback = buildXrayConfig([node], node.id, 'split', null, { dns: 'nonsense' });
   assert.equal(fallback.dns, undefined);

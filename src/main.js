@@ -583,7 +583,7 @@ function settingsMarkup() {
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.unavailableTitle'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
-      <div class="setting"><div><strong>${escapeHtml(t('home.dnsProtection'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.desc`))}</small><small class="muted">${escapeHtml(t('home.dnsProtectionInfo'))}</small>${state.dnsCheck ? `<small class="${state.dnsCheck.ok ? '' : 'warn'}">${escapeHtml(t(state.dnsCheck.ok ? 'settings.dnsCheckOk' : 'settings.dnsCheckFail', { server: state.dnsCheck.server || '' }))}</small>` : ''}</div><div class="row-actions"><button class="button small" id="dns-check" ${state.dnsCheck?.running ? 'disabled' : ''}>${escapeHtml(t('settings.checkDns'))}</button><label class="switch"><input type="checkbox" id="settings-dns-protection" data-toggle="dns-protection" aria-label="${escapeHtml(t('home.dnsProtection'))}" ${dnsMode === 'builtin' ? 'checked' : ''}/><span></span></label></div></div>
+      <div class="setting"><div><strong>${escapeHtml(t('home.dnsProtection'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.desc`))}</small><small class="muted">${escapeHtml(t('home.dnsProtectionInfo'))}</small>${state.dnsCheck ? `<small class="${state.dnsCheck.ok ? '' : 'warn'}">${escapeHtml(t(state.dnsCheck.ok ? 'settings.dnsCheckOk' : 'settings.dnsCheckFail', { server: state.dnsCheck.server || '', ip: state.dnsCheck.ip || '' }))}</small>${state.dnsCheck.ok ? `<small class="muted">${escapeHtml(t('settings.dnsCheckPath', { path: t(`settings.dnsVia.${state.dnsCheck.via || 'bootstrap-ip'}`, { ip: state.dnsCheck.ip || '' }) }))}</small>` : ''}` : ''}</div><div class="row-actions"><button class="button small" id="dns-check" ${state.dnsCheck?.running ? 'disabled' : ''}>${escapeHtml(t('settings.checkDns'))}</button><label class="switch"><input type="checkbox" id="settings-dns-protection" data-toggle="dns-protection" aria-label="${escapeHtml(t('home.dnsProtection'))}" ${dnsMode === 'builtin' ? 'checked' : ''}/><span></span></label></div></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.failover'))}</strong></div><select id="failover-mode" aria-label="${escapeHtml(t('settings.failover'))}">${['country', 'any', 'never'].map((id) => `<option value="${id}" ${id === (state.settings?.failover || 'country') ? 'selected' : ''}>${escapeHtml(t(`settings.failoverMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
@@ -1283,7 +1283,7 @@ async function checkDns() {
   try {
     const results = await desktopBridge.dnsCheck(['example.com', 'cloudflare.com', 'yandex.ru']);
     const hit = (results || []).find((item) => item?.source === 'doh' || item?.source === 'cache');
-    state.dnsCheck = hit ? { ok: true, server: hit.server } : { ok: false };
+    state.dnsCheck = hit ? { ok: true, server: hit.server, ip: hit.server_ip || '', via: hit.via || 'bootstrap-ip' } : { ok: false };
   } catch { state.dnsCheck = { ok: false }; }
   render();
 }
