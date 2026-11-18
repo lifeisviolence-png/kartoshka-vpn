@@ -217,13 +217,16 @@ jobs:
           & (Join-Path $dest 'xray.exe') run -test -config (Resolve-Path tests/windows-geodata.json).Path
           if ($LASTEXITCODE -ne 0) { throw 'Installed Xray could not load installed geodata' }
           Write-Output 'PASS installed sidecar, geodata and licenses verified'
-      - name: Authenticode signing
-        if: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
+      - name: Authenticode signing (optional)
         shell: pwsh
         env:
           CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
+          if (-not $env:CERT_PFX_BASE64) {
+            Write-Output '::warning::Сертификат Authenticode не настроен: установщик не подписан. Задайте WINDOWS_CERT_PFX_BASE64 и WINDOWS_CERT_PASSWORD.'
+            exit 0
+          }
           $ErrorActionPreference = 'Stop'
           $pfx = Join-Path $env:RUNNER_TEMP 'authenticode.pfx'
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX_BASE64))
@@ -234,10 +237,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed' }
           Remove-Item $pfx -Force
           Write-Output "PASS installer signed: $($installer.Name)"
-      - name: Authenticode signing skipped
-        if: ${{ secrets.WINDOWS_CERT_PFX_BASE64 == '' }}
-        shell: pwsh
-        run: Write-Output '::warning::Сертификат Authenticode не настроен: установщик не подписан. Задайте WINDOWS_CERT_PFX_BASE64 и WINDOWS_CERT_PASSWORD.'
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
