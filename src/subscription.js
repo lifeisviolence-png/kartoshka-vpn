@@ -246,11 +246,13 @@ function parseHysteria(raw, index) {
     node.unsupportedReason = 'sub.hy2PortHopping';
     node.params = { spec: hopping.spec, count: ports.count, first: ports.first };
     node.portHopping = { spec: hopping.spec, count: ports.count, first: ports.first, last: ports.last, source: hopping.source };
+    node.originalUri = raw;
     return node;
   }
   const name = cleanName(decoded(url.hash.slice(1)), `Hysteria2 ${index + 1}`);
   const o = { type: 'hysteria2', server: hostOf(url), server_port: Number(url.port || 443), password: decoded(url.username) + (url.password ? `:${decoded(url.password)}` : ''), ...(ports?.single ? { server_port: ports.single } : {}), tls: { enabled: true, server_name: hostOf(url) }, ...(url.searchParams.get('up') ? { up: url.searchParams.get('up') } : {}), ...(url.searchParams.get('down') ? { down: url.searchParams.get('down') } : {}), ...(url.searchParams.get('congestion') ? { congestion: url.searchParams.get('congestion') } : {}) };
   const node = makeNode(name, o, index, 'Hysteria2');
+  node.originalUri = raw;
   try {
     const p = query(url, ['sni', 'insecure', 'obfs', 'obfs-password', 'pinSHA256', 'ech', 'up', 'down', 'congestion']);
     if (url.pathname && url.pathname !== '/') issue('sub.unexpectedPath');

@@ -52,6 +52,9 @@ async function setup({ initial = {}, native = false, overrides = {}, store = sto
     async readLogs() { return ''; },
     async lookupCountries() { calls.countries++; return []; },
     async probeNodeLatency() { calls.probes++; return 25; },
+    async loadSecureState() { return store.getItem('secure-state'); },
+    async saveSecureState(text) { store.setItem('secure-state', text); return { ok: true }; },
+    async resetSecureState() { store.removeItem('secure-state'); return { ok: true }; },
     ...overrides
   };
   const context = {
@@ -66,7 +69,7 @@ async function setup({ initial = {}, native = false, overrides = {}, store = sto
   await new Promise((resolve) => setTimeout(resolve, 0));
   return { ...context.hooks, store, calls, bridge, element, get html() { return html; } };
 }
-const snapshotOf = (h) => h.store.getItem(key);
+const snapshotOf = (h) => h.store.getItem('secure-state') ?? h.store.getItem(key);
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const legacyNode = (uri) => parseSubscriptionDetailed(uri).nodes[0];
 async function importAndApply(h, value) {

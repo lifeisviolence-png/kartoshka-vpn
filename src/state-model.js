@@ -104,7 +104,7 @@ export function migrateState(raw) {
   let subscriptionId = null;
   if (url) {
     subscriptionId = subscriptionIdFor(url);
-    subscriptions.push({ id: subscriptionId, name: subscriptionNameFor(url, legacyMeta), url, updatedAt: legacyMeta?.updatedAt || null, meta: legacyMeta ? { used: legacyMeta.used, total: legacyMeta.total, expiresAt: legacyMeta.expiresAt, title: legacyMeta.title } : null });
+    subscriptions.push({ id: subscriptionId, name: subscriptionNameFor(url, legacyMeta), url, updatedAt: legacyMeta?.updatedAt || null, meta: legacyMeta ? { used: legacyMeta.used, total: legacyMeta.total, expiresAt: legacyMeta.expiresAt, title: legacyMeta.title, supportUrl: legacyMeta.supportUrl, homeUrl: legacyMeta.homeUrl } : null });
   }
   const nodes = (Array.isArray(raw.nodes) ? raw.nodes : []).map((node) => {
     if (!node || !node.id) return null;
