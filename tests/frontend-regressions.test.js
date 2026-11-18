@@ -18,7 +18,7 @@ const U4 = '44444444-4444-4444-8444-444444444444';
 const link = (uuid, host = 'one.example', name = 'Node', type = 'tcp') => `vless://${uuid}@${host}:443?type=${type}#${name}`;
 const key = 'kartoshka.state.v2';
 const source = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
-  .replace(/^import .*;\s*$/gm, '') + `\n;globalThis.hooks = { state, prepareImport, applyImport, runImport, applyPendingImport, importSummary, ensurePin, selectServer, toggleConnection, toggleDisabled, pingProxy, pingOne, pingAll, refreshSubscription, deleteSubscription, homeMarkup, serversMarkup, settingsMarkup, logsMarkup, statusInfo, nodeIdentity, nodeSignature, commitData, render, setLanguage, mergeKey, enrichCountries, handleHealth, failoverCandidate };`;
+  .replace(/^import .*;\s*$/gm, '') + `\n;globalThis.hooks = { state, prepareImport, applyImport, runImport, applyPendingImport, importSummary, ensurePin, selectServer, toggleConnection, toggleDisabled, pingProxy, pingOne, pingAll, refreshSubscription, deleteSubscription, homeMarkup, serversMarkup, settingsMarkup, logsMarkup, statusInfo, nodeIdentity, nodeSignature, commitData, render, setLanguage, mergeKey, enrichCountries, handleHealth, failoverCandidate, protectNodeAddress, setDnsProtection, setFastReconnect, dnsProtectionOn, fastReconnectOn, homeMarkup, settingsMarkup };`;
 
 function storage(initial = {}) {
   const data = new Map(Object.entries(initial));
@@ -303,4 +303,55 @@ test('автопереключение: «не переключать» оста
   await h.handleHealth('unhealthy', 'core stopped');
   assert.equal(h.state.activeNode.id, h.state.servers[0].id);
   assert.equal(h.state.message.key, 'notice.healthNoSwitch');
+});
+
+test('DNS до подключения: адрес заменяется, SNI и Host сохраняются', async () => {
+  const h = await setup({ native: true, overrides: { async resolveHost() { return { ip: '203.0.113.9', source: 'doh', server: 'https://cloudflare-dns.com/dns-query' }; } } });
+  const node = parseSubscriptionDetailed('vless://' + U1 + '@panel.example:443?type=ws&security=tls&sni=panel.example&host=cdn.example&path=%2Fws#WS').nodes[0];
+  const original = JSON.stringify(node);
+  const pinned = await h.protectNodeAddress(node);
+  assert.equal(pinned.outbound.server, '203.0.113.9');
+  assert.equal(pinned.outbound.tls.server_name, 'panel.example');
+  assert.equal(pinned.outbound.transport.headers.Host, 'cdn.example');
+  assert.equal(JSON.stringify(node), original, 'исходный узел не меняется');
+});
+test('DNS до подключения: откат на системный DNS виден и попадает в лог', async () => {
+  const h = await setup({ native: true, overrides: { async resolveHost() { return { ip: '198.51.100.7', source: 'system', server: null }; } } });
+  const node = parseSubscriptionDetailed(link(U1, 'panel.example')).nodes[0];
+  const result = await h.protectNodeAddress(node);
+  assert.equal(result.outbound.server, 'panel.example');
+  assert.equal(h.state.notice.text, t('notice.dnsFallback'));
+  assert.ok(h.state.logs.some((line) => line.includes(t('notice.dnsFallback'))));
+});
+test('тумблеры DNS и TFO синхронизированы между главной и настройками', async () => {
+  const h = await setup();
+  assert.equal(h.dnsProtectionOn(), true);
+  assert.equal(h.fastReconnectOn(), false);
+  h.setDnsProtection(false);
+  h.setFastReconnect(true);
+  assert.equal(h.state.settings.dns, 'system');
+  assert.equal(h.state.settings.perf.tcpFastOpen, true);
+  await importAndApply(h, 'https://provider.example/sub', link(U1, 'de1.example', 'DE-1'));
+  for (const markup of [h.homeMarkup(h.state.servers[0]), h.settingsMarkup()]) {
+    const dns = markup.match(/<input[^>]*data-toggle="dns-protection"[^>]*>/)[0];
+    const tfo = markup.match(/<input[^>]*data-toggle="fast-reconnect"[^>]*>/)[0];
+    assert.ok(!dns.includes('checked'), 'DNS выключен в обоих местах');
+    assert.ok(tfo.includes('checked'), 'TFO включён в обоих местах');
+    assert.ok(/aria-label="[^"]+"/.test(dns) && /aria-label="[^"]+"/.test(tfo), 'есть aria-label');
+  }
+});
+test('TFO при активном подключении не рвёт сессию и отключается после двух сбоев', async () => {
+  const h = await setup({ native: true });
+  h.state.connection = 'connected';
+  h.setFastReconnect(true);
+  assert.equal(h.state.connection, 'connected');
+  assert.equal(h.state.notice.text, t('notice.fastReconnectPending'));
+  assert.equal(h.state.notice.action, 'reconnect');
+  h.state.settings = { ...h.state.settings, failover: 'never' };
+  await h.handleHealth('unhealthy', 'boom');
+  assert.equal(h.fastReconnectOn(), true, 'одного сбоя недостаточно');
+  await h.handleHealth('unhealthy', 'boom');
+  assert.equal(h.fastReconnectOn(), false);
+  assert.equal(h.state.notice.text, t('notice.fastReconnectDisabled'));
+  assert.ok(h.state.logs.some((line) => line.includes(t('notice.fastReconnectDisabled'))));
 });

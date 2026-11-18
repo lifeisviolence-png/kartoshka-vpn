@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod country;
+mod doh;
 
 use std::{fs, io::Write, net::TcpStream as StdTcpStream, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime}};
 use serde::{Deserialize, Serialize};
@@ -1055,15 +1056,43 @@ fn xray_path() -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-async fn fetch_subscription(url: String) -> Result<SubscriptionResponse, String> {
+async fn fetch_subscription(url: String, protect_dns: Option<bool>) -> Result<SubscriptionResponse, String> {
     let trimmed = url.trim().to_string();
     if ["vless://", "vmess://", "trojan://", "ss://", "hysteria2://"].iter().any(|p| trimmed.starts_with(p)) { return Ok(SubscriptionResponse { body: trimmed, userinfo: None }); }
     if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) { return Err("Ссылка должна начинаться с http:// или https://".into()); }
-    let response = reqwest::Client::builder().timeout(Duration::from_secs(30)).user_agent("KartoshkaVPN/0.7.0").redirect(reqwest::redirect::Policy::limited(5)).build().map_err(|e| e.to_string())?.get(trimmed).header("Accept", "text/plain, text/*, */*").send().await.map_err(|e| format!("Не удалось открыть подписку: {}", e.without_url()))?.error_for_status().map_err(|e| format!("Сервер подписки вернул ошибку: {}", e.without_url()))?;
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30)).user_agent("KartoshkaVPN/0.9.4").redirect(reqwest::redirect::Policy::limited(5));
+    // With DNS protection the panel host is resolved over DoH; reqwest keeps the
+    // hostname for SNI and Host while connecting to the pinned address.
+    if protect_dns.unwrap_or(false) {
+        if let Ok(parsed) = reqwest::Url::parse(&trimmed) {
+            if let Some(host) = parsed.host_str() {
+                if host.parse::<std::net::IpAddr>().is_err() {
+                    if let Some(addr) = doh::resolve_for_client(host, parsed.port_or_known_default().unwrap_or(443)).await {
+                        builder = builder.resolve(host, addr);
+                    }
+                }
+            }
+        }
+    }
+    let response = builder.build().map_err(|e| e.to_string())?.get(trimmed).header("Accept", "text/plain, text/*, */*").send().await.map_err(|e| format!("Не удалось открыть подписку: {}", e.without_url()))?.error_for_status().map_err(|e| format!("Сервер подписки вернул ошибку: {}", e.without_url()))?;
     let userinfo = response.headers().get("subscription-userinfo").and_then(|v| v.to_str().ok()).map(str::to_owned);
     let body = response.text().await.map_err(|e| format!("Не удалось прочитать подписку: {}", e.without_url()))?;
     Ok(SubscriptionResponse { body, userinfo })
 }
+#[tauri::command]
+async fn resolve_host(name: String) -> Result<doh::Resolution, String> {
+    Ok(doh::resolve(&name).await)
+}
+
+#[tauri::command]
+async fn dns_check(names: Vec<String>) -> Result<Vec<doh::Resolution>, String> {
+    let mut out = Vec::new();
+    for name in names.into_iter().take(3) {
+        out.push(doh::resolve(&name).await);
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 async fn test_latency(host: String, port: u16) -> Result<Option<u32>, String> {
     let started = Instant::now();
@@ -1326,7 +1355,7 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let _instance = match windows::one_instance() { Ok(v) => v, Err(e) => { windows::show_error(&e); return; } };
-    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![fetch_subscription, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
+    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![fetch_subscription, resolve_host, dns_check, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }

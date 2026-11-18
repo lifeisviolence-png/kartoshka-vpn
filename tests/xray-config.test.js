@@ -256,8 +256,11 @@ test('DNS: system не добавляет резолвер, builtin включа
   assert.equal(builtin.routing.domainStrategy, 'IPIfNonMatch');
   assert.equal(builtin.dns.disableCache, false);
   assert.equal(builtin.dns.queryStrategy, 'UseIPv4');
-  assert.ok(builtin.dns.servers.some((server) => String(server.address).startsWith('https://')));
-  assert.ok(builtin.dns.servers.some((server) => server.address === '77.88.8.8' && server.domains.includes('domain:ru')));
+  // DoH only: a plain UDP resolver would let the provider read every name.
+  assert.ok(builtin.dns.servers.every((server) => String(server.address).startsWith('https://')));
+  assert.ok(builtin.dns.servers.every((server) => !/:53\b/.test(String(server.address))));
+  assert.ok(builtin.dns.servers.some((server) => server.address === 'https://common.dot.dns.yandex.net/dns-query' && server.domains.includes('domain:ru')));
+  assert.ok(builtin.dns.servers.some((server) => server.address === 'https://cloudflare-dns.com/dns-query'));
   // Unknown values must not silently disable resolution for rules.
   const fallback = buildXrayConfig([node], node.id, 'split', null, { dns: 'nonsense' });
   assert.equal(fallback.dns, undefined);
@@ -363,6 +366,19 @@ test('xray run -test принимает XHTTP из query и Hysteria2 с пол�
       writeFileSync(path, JSON.stringify(config(link)), { mode: 0o600 });
       const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
       assert.equal(result.status, 0, `ядро отклонило конфигурацию ${index}: ${result.stderr} ${result.stdout}`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+test('xray run -test принимает DoH-конфиг и TCP Fast Open', { skip: !process.env.XRAY_TEST_BIN }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kartovpn-doh-'));
+  try {
+    const node = parseOne(xhttp);
+    for (const [name, options] of [['doh', { dns: 'builtin' }], ['doh-tfo', { dns: 'builtin', perf: { tcpFastOpen: true } }], ['system', { dns: 'system' }]]) {
+      const config = buildXrayConfig([node], node.id, 'split', null, options);
+      const path = join(dir, `${name}.json`);
+      writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
+      const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `ядро отклонило ${name}: ${result.stderr} ${result.stdout}`);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

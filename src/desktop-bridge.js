@@ -16,9 +16,9 @@ export const desktopBridge = {
     await invoke('stop_proxy');
     return { ok: true, native: true };
   },
-  async fetchSubscription(url) {
+  async fetchSubscription(url, protectDns = false) {
     if (directScheme.test(url)) return { body: url, userinfo: null };
-    if (isDesktop) return invoke('fetch_subscription', { url });
+    if (isDesktop) return invoke('fetch_subscription', { url, protectDns: Boolean(protectDns) });
     const response = await fetch(url, { cache: 'no-store', headers: { Accept: 'text/plain, text/*, */*' } });
     if (!response.ok) throw new Error(t('bridge.subscriptionHttp', { status: response.status }));
     return { body: await response.text(), userinfo: response.headers.get('subscription-userinfo') };
@@ -27,6 +27,8 @@ export const desktopBridge = {
     if (!isDesktop) throw new Error(t('bridge.previewCertificate'));
     return invoke('pin_peer_certificate', { host, port: Number(port), serverName: String(serverName || host) });
   },
+  async resolveHost(name) { return invoke('resolve_host', { name }); },
+  async dnsCheck(names) { return invoke('dns_check', { names }); },
   async pingNode(node) {
     if (!isDesktop || !node?.outbound?.server) return null;
     return invoke('test_latency', { host: node.outbound.server, port: Number(node.outbound.server_port || 443) });
