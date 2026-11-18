@@ -421,3 +421,21 @@ select:disabled { opacity: 0.5; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
+
+/* DNS protection and fast reconnect rows under the connect button. */
+.home-switches { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.home-switch { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.home-switch .switch-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; cursor: pointer; }
+.home-switch .switch-text strong { font-size: 13px; }
+.home-switch .switch-text small { color: var(--muted); font-size: 11.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.info { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); font-size: 11px; cursor: help; flex: none; }
+.info:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.row-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+.setting .warn { color: var(--danger, #ff8a8a); }
+@media (max-width: 900px) {
+  .home-switch .switch-text small { display: none; }
+  .home-switches { flex-direction: row; gap: 8px; }
+  .home-switch { flex: 1; padding: 7px 9px; gap: 6px; }
+  .home-switch .switch-text strong { font-size: 12px; }
+  .home-switch .info { display: none; }
+}

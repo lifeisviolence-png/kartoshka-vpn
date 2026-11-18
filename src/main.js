@@ -77,6 +77,10 @@ const state = {
   diagnostics: '',
   message: { key: capabilities.native ? 'state.checkingProxy' : 'state.previewNoConnect' }
 };
+// Effective values: stored settings stay untouched until the user flips a switch,
+// so a migration never rewrites the old settings object.
+const dnsProtectionOn = () => state.settings?.dnsProtection ?? (state.settings?.dns !== 'system');
+const fastReconnectOn = () => state.settings?.fastReconnect ?? (state.settings?.perf?.tcpFastOpen === true);
 setLanguage(state.language);
 if (!state.selectedId || !state.servers.some((node) => node.id === state.selectedId)) state.selectedId = state.servers[0]?.id || null;
 state.servers = state.servers.map(applyCountry);
@@ -263,7 +267,8 @@ function navItem(id, iconName, label) {
 function renderNotice() {
   if (!state.notice) return '';
   const details = state.notice.details?.length ? `<ul>${state.notice.details.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '';
-  return `<div class="notice ${state.notice.type === 'error' ? 'notice-error' : ''}" role="status"><div>${escapeHtml(state.notice.text)}${details}</div><button class="icon-button" data-action="dismiss-notice" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 14)}</button></div>`;
+  const action = state.notice.action === 'reconnect' ? `<button class="button small" data-action="reconnect">${escapeHtml(t('action.reconnect'))}</button>` : '';
+  return `<div class="notice ${state.notice.type === 'error' ? 'notice-error' : ''}" role="status"><div>${escapeHtml(state.notice.text)}${details}</div>${action}<button class="icon-button" data-action="dismiss-notice" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 14)}</button></div>`;
 }
 function toastMarkup() {
   if (!state.toast) return '';
@@ -429,6 +434,18 @@ function homeMarkup(selected) {
       </div>
       <div class="spark-block"><div class="spark-head"><span>${escapeHtml(t('home.latency'))}</span><span class="spark-value">${Number.isFinite(activePing) ? `${activePing} ${t('unit.ms')}` : '—'}</span></div>${sparkline(state.latencyHistory)}</div>
       <button class="connect-button ${state.connection === 'connected' ? 'danger' : 'primary'}" data-action="toggle" data-focus-key="home-connect" ${disabled}>${icon('power', 16)}${escapeHtml(actionLabel())}</button>
+      <div class="home-switches">
+        <div class="home-switch">
+          <label class="switch-text" for="home-dns-protection"><strong>${escapeHtml(t('home.dnsProtection'))}</strong><small>${escapeHtml(t('home.dnsProtectionHint'))}</small></label>
+          <span class="info" tabindex="0" role="note" aria-label="${escapeHtml(t('home.dnsProtectionInfo'))}" title="${escapeHtml(t('home.dnsProtectionInfo'))}">i</span>
+          <label class="switch"><input type="checkbox" id="home-dns-protection" data-toggle="dns-protection" aria-label="${escapeHtml(t('home.dnsProtection'))}" ${dnsProtectionOn() ? 'checked' : ''}/><span></span></label>
+        </div>
+        <div class="home-switch">
+          <label class="switch-text" for="home-fast-reconnect"><strong>${escapeHtml(t('home.fastReconnect'))}</strong><small>${escapeHtml(t('home.fastReconnectHint'))}</small></label>
+          <span class="info" tabindex="0" role="note" aria-label="${escapeHtml(t('home.fastReconnectInfo'))}" title="${escapeHtml(t('home.fastReconnectInfo'))}">i</span>
+          <label class="switch"><input type="checkbox" id="home-fast-reconnect" data-toggle="fast-reconnect" aria-label="${escapeHtml(t('home.fastReconnect'))}" ${fastReconnectOn() ? 'checked' : ''}/><span></span></label>
+        </div>
+      </div>
       ${reason ? `<div class="inline-warning">${escapeHtml(reason)}</div>` : ''}
       ${differs ? `<div class="inline-note">${escapeHtml(t('home.activeUnchanged'))}</div>` : ''}
       ${selected?.source === 'subscription-retained' ? `<div class="inline-warning">${escapeHtml(t('home.retained'))}</div>` : ''}
@@ -556,7 +573,7 @@ function settingsMarkup() {
       <div class="setting"><div><strong>${escapeHtml(t('speed.url'))}</strong><small>${escapeHtml(t('speed.urlHint'))}</small></div><input id="speed-url" type="url" class="text-input" placeholder="https://" value="${escapeHtml(state.settings?.speedUrl || '')}"/></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.perf.sniffing'))}</strong><small>${escapeHtml(t('settings.perf.sniffingHint'))}</small></div><label class="switch"><input type="checkbox" id="perf-sniffing" ${state.settings?.perf?.sniffing ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.perf.preferIPv4'))}</strong><small>${escapeHtml(t('settings.perf.preferIPv4Hint'))}</small></div><label class="switch"><input type="checkbox" id="perf-ipv4" ${state.settings?.perf?.preferIPv4 ? 'checked' : ''}/><span></span></label></div>
-      <div class="setting"><div><strong>${escapeHtml(t('settings.perf.tcpFastOpen'))}</strong><small>${escapeHtml(t('settings.perf.tcpFastOpenHint'))}</small></div><label class="switch"><input type="checkbox" id="perf-tfo" ${state.settings?.perf?.tcpFastOpen ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('home.fastReconnect'))}</strong><small>${escapeHtml(t('home.fastReconnectHint'))}</small><small class="muted">${escapeHtml(t('home.fastReconnectInfo'))}</small></div><label class="switch"><input type="checkbox" id="settings-fast-reconnect" data-toggle="fast-reconnect" aria-label="${escapeHtml(t('home.fastReconnect'))}" ${state.settings?.fastReconnect ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.debug'))}</strong><small>${escapeHtml(t('settings.debugHint'))}</small></div><label class="switch"><input type="checkbox" id="debug-mode" ${state.settings?.debug ? 'checked' : ''}/><span></span></label></div>
     </div>
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.data'))}</span></div>
@@ -566,7 +583,7 @@ function settingsMarkup() {
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.unavailableTitle'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
-      <div class="setting"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.hint`))}</small></div><select id="dns-mode" aria-label="${escapeHtml(t('settings.dns'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${dnsModeIds.map((id) => `<option value="${id}" ${id === dnsMode ? 'selected' : ''}>${escapeHtml(t(`settings.dnsMode.${id}`))}</option>`).join('')}</select></div>
+      <div class="setting"><div><strong>${escapeHtml(t('home.dnsProtection'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.desc`))}</small><small class="muted">${escapeHtml(t('home.dnsProtectionInfo'))}</small>${state.dnsCheck ? `<small class="${state.dnsCheck.ok ? '' : 'warn'}">${escapeHtml(t(state.dnsCheck.ok ? 'settings.dnsCheckOk' : 'settings.dnsCheckFail', { server: state.dnsCheck.server || '' }))}</small>` : ''}</div><div class="row-actions"><button class="button small" id="dns-check" ${state.dnsCheck?.running ? 'disabled' : ''}>${escapeHtml(t('settings.checkDns'))}</button><label class="switch"><input type="checkbox" id="settings-dns-protection" data-toggle="dns-protection" aria-label="${escapeHtml(t('home.dnsProtection'))}" ${dnsMode === 'builtin' ? 'checked' : ''}/><span></span></label></div></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.failover'))}</strong></div><select id="failover-mode" aria-label="${escapeHtml(t('settings.failover'))}">${['country', 'any', 'never'].map((id) => `<option value="${id}" ${id === (state.settings?.failover || 'country') ? 'selected' : ''}>${escapeHtml(t(`settings.failoverMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
@@ -657,6 +674,11 @@ function bindEvents() {
   document.querySelectorAll('[data-action="close-result"]').forEach((button) => button.addEventListener('click', () => { state.pendingImport = null; state.modal = null; render(); }));
   document.querySelector('[data-action="apply-import"]')?.addEventListener('click', () => applyPendingImport());
   document.querySelectorAll('[data-action="dismiss-notice"]').forEach((button) => button.addEventListener('click', () => { state.notice = null; render(); }));
+  document.querySelectorAll('[data-toggle]').forEach((input) => input.addEventListener('change', () => {
+    if (input.dataset.toggle === 'dns-protection') setDnsProtection(input.checked); else setFastReconnect(input.checked);
+  }));
+  document.querySelectorAll('[data-action="reconnect"]').forEach((button) => button.addEventListener('click', reconnectNow));
+  document.querySelector('#dns-check')?.addEventListener('click', checkDns);
   document.querySelectorAll('[data-action="dismiss-toast"]').forEach((button) => button.addEventListener('click', () => { state.toast = null; render(); }));
   document.querySelector('[data-action="toast-action"]')?.addEventListener('click', () => { const action = state.toast?.action; state.toast = null; action?.(); render(); });
   document.querySelector('#server-search')?.addEventListener('input', (event) => { state.search = event.target.value; render(); });
@@ -715,7 +737,7 @@ function bindEvents() {
     commitData({ language, settings: { ...(state.settings || {}), language } });
     render();
   });
-  for (const [id, key] of [['perf-sniffing', 'sniffing'], ['perf-ipv4', 'preferIPv4'], ['perf-tfo', 'tcpFastOpen']]) {
+  for (const [id, key] of [['perf-sniffing', 'sniffing'], ['perf-ipv4', 'preferIPv4']]) {
     document.querySelector(`#${id}`)?.addEventListener('change', (event) => {
       commitData({ settings: { ...(state.settings || {}), perf: { ...(state.settings?.perf || {}), [key]: event.target.checked } } }); render();
     });
@@ -761,7 +783,7 @@ async function prepareImport(value) {
   let response;
   if (routingOnly) response = { body: text, userinfo: null };
   else {
-    try { response = isSubscription ? await desktopBridge.fetchSubscription(text) : { body: text, userinfo: null }; }
+    try { response = isSubscription ? await desktopBridge.fetchSubscription(text, dnsProtectionOn()) : { body: text, userinfo: null }; }
     catch (error) { throw Object.assign(new Error('subscriptionFailed'), { code: 'subscriptionFailed', params: { error: errorText(error) } }); }
   }
   const parsed = parseSubscriptionDetailed(response.body ?? response);
@@ -1141,9 +1163,10 @@ async function startSelected(node) {
   try {
     // Pin the stored node, not a copy: the fingerprint must survive the session.
     if (node.needsPin) { setMessage('state.pinning'); render(); await ensurePin(node); }
-    const snapshotNode = copyNode(node);
-    const pool = autoPool(snapshotNode);
-    const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: state.settings?.dns, perf: state.settings?.perf, auto: pool.length > 1 ? pool : undefined });
+    const snapshotNode = await protectNodeAddress(copyNode(node));
+    const poolRaw = autoPool(snapshotNode);
+    const pool = poolRaw.length > 1 ? await Promise.all(poolRaw.map(protectNodeAddress)) : poolRaw;
+    const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: dnsProtectionOn() ? 'builtin' : 'system', perf: { ...(state.settings?.perf || {}), tcpFastOpen: fastReconnectOn() }, auto: pool.length > 1 ? pool : undefined });
     const result = await desktopBridge.connect({ config, debug: Boolean(state.settings?.debug) });
     if (result?.ok === false) throw Object.assign(new Error('proxyLaunchFailed'), { code: 'proxyLaunchFailed', params: { error: errorText(result.error) } });
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringConnect'), { code: 'xrayExitedDuringConnect' });
@@ -1215,6 +1238,55 @@ function failoverCandidate(servers, active, mode, isUsable) {
   return candidates.find((node) => node.country && node.country === active?.country) || null;
 }
 let lastHealthSwitch = 0;
+const IP_ONLY = /^(?:\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]+$/i;
+// DNS protection resolves the node host over DoH before the core starts and
+// substitutes the address while keeping the original name for TLS/Reality.
+async function protectNodeAddress(node) {
+  const host = node?.outbound?.server;
+  if (!dnsProtectionOn() || !host || IP_ONLY.test(host)) return node;
+  try {
+    const result = await desktopBridge.resolveHost(host);
+    if (!result?.ip || result.source === 'system' || result.source === 'failed') {
+      state.notice = { type: 'error', text: t('notice.dnsFallback') };
+      appendLocalLog(t('notice.dnsFallback'));
+      return node;
+    }
+    const copy = copyNode(node);
+    copy.outbound.server = result.ip;
+    if (copy.outbound.tls?.enabled) copy.outbound.tls.server_name = copy.outbound.tls.server_name || host;
+    const transport = copy.outbound.transport;
+    if (transport && !transport.host && !transport.headers?.Host && ['ws', 'httpupgrade', 'xhttp', 'splithttp', 'h2', 'grpc'].includes(transport.type)) transport.host = host;
+    return copy;
+  } catch { return node; }
+}
+function setDnsProtection(on) {
+  commitData({ settings: { ...(state.settings || {}), dnsProtection: Boolean(on), dns: on ? 'builtin' : 'system' } });
+  render();
+}
+function setFastReconnect(on) {
+  commitData({ settings: { ...(state.settings || {}), fastReconnect: Boolean(on), perf: { ...(state.settings?.perf || {}), tcpFastOpen: Boolean(on) } } });
+  state.tfoFailures = 0;
+  state.notice = state.connection === 'connected' ? { type: 'info', text: t('notice.fastReconnectPending'), action: 'reconnect' } : null;
+  render();
+}
+async function reconnectNow() {
+  if (busy()) return;
+  const node = state.activeNode || selectedNode();
+  if (!node) return;
+  if (!(await stopCurrent())) return;
+  state.connection = 'idle';
+  await startSelected(node);
+}
+async function checkDns() {
+  state.dnsCheck = { running: true };
+  render();
+  try {
+    const results = await desktopBridge.dnsCheck(['example.com', 'cloudflare.com', 'yandex.ru']);
+    const hit = (results || []).find((item) => item?.source === 'doh' || item?.source === 'cache');
+    state.dnsCheck = hit ? { ok: true, server: hit.server } : { ok: false };
+  } catch { state.dnsCheck = { ok: false }; }
+  render();
+}
 async function handleHealth(kind, payload) {
   if (kind === 'restarted') {
     try { state.logs = (await desktopBridge.readLogs()).split('\n').filter(Boolean); } catch { /* лог необязателен */ }
@@ -1222,6 +1294,18 @@ async function handleHealth(kind, payload) {
     return;
   }
   if (state.connection !== 'connected' || Date.now() - lastHealthSwitch < 60000) return;
+  // Two failures in a row after enabling TCP Fast Open mean the network drops it.
+  if (fastReconnectOn()) {
+    state.tfoFailures = (state.tfoFailures || 0) + 1;
+    if (state.tfoFailures >= 2) {
+      state.tfoFailures = 0;
+      commitData({ settings: { ...(state.settings || {}), fastReconnect: false, perf: { ...(state.settings?.perf || {}), tcpFastOpen: false } } });
+      state.notice = { type: 'error', text: t('notice.fastReconnectDisabled') };
+      appendLocalLog(t('notice.fastReconnectDisabled'));
+      render();
+      return;
+    }
+  }
   // The core could not restart the tunnel. Switching changes the exit country and
   // the external IP, so it is a setting: same country by default.
   const failover = state.settings?.failover === 'any' || state.settings?.failover === 'never' ? state.settings.failover : 'country';

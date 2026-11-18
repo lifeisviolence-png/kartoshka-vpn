@@ -191,12 +191,17 @@ const DEFAULT_DIRECT = {
 //   builtin — the core resolves through DoH and keeps the answers, so IP rules
 //             work and the provider domain never reaches the local resolver.
 export const DNS_MODES = ['system', 'builtin'];
+// DoH only: no plain UDP servers, so a provider cannot read or rewrite names.
+// .ru goes to the Russian resolver, everything else to the fallback resolver.
+export const DOH_SERVERS = {
+  ru: 'https://common.dot.dns.yandex.net/dns-query',
+  fallback: 'https://cloudflare-dns.com/dns-query'
+};
 function builtinDns() {
   return {
     servers: [
-      { address: 'https://1.1.1.1/dns-query', domains: ['geosite:geolocation-!cn'], skipFallback: true },
-      { address: '77.88.8.8', domains: ['domain:ru', 'geosite:category-ru'], skipFallback: true },
-      { address: '8.8.8.8' }
+      { address: DOH_SERVERS.ru, domains: ['domain:ru', 'geosite:category-ru'], skipFallback: true },
+      { address: DOH_SERVERS.fallback }
     ],
     queryStrategy: 'UseIPv4',
     disableCache: false
