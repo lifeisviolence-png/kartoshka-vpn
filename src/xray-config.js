@@ -1,3 +1,4 @@
+import { FALLBACK_PROVIDER, RU_PROVIDER } from './dns-providers.js';
 // Xray-core v26.10.31, proxy-only. Node.outbound remains in the app's legacy shape.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FINGERPRINTS = new Set(['chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized', 'unsafe']);
@@ -194,11 +195,13 @@ export const DNS_MODES = ['system', 'builtin'];
 // DoH only: no plain UDP servers, so a provider cannot read or rewrite names.
 // .ru goes to the Russian resolver, everything else to the fallback resolver.
 export const DOH_SERVERS = {
-  ru: 'https://common.dot.dns.yandex.net/dns-query',
-  fallback: 'https://cloudflare-dns.com/dns-query'
+  ru: RU_PROVIDER.ipUrl,
+  fallback: FALLBACK_PROVIDER.ipUrl
 };
+export const DNS_INBOUND_TAG = 'dns-query';
 function builtinDns() {
   return {
+    tag: DNS_INBOUND_TAG,
     servers: [
       { address: DOH_SERVERS.ru, domains: ['domain:ru', 'geosite:category-ru'], skipFallback: true },
       { address: DOH_SERVERS.fallback }
@@ -265,6 +268,11 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
   }
   if (needsDirect) outbounds.push({ tag: 'direct', protocol: 'freedom' });
   if (needsBlock) outbounds.push({ tag: 'block', protocol: 'blackhole' });
+  // Built-in DNS must not leak to the provider: match its internal queries by tag
+  // (documented for Xray 26.10.31) and send them through the same proxy outbound.
+  if (dnsMode === 'builtin' && rules.length) {
+    rules.unshift({ type: 'field', inboundTag: [DNS_INBOUND_TAG], outboundTag: 'proxy' });
+  }
   if (balanced) {
     for (const rule of rules) {
       if (rule.outboundTag === 'proxy') { delete rule.outboundTag; rule.balancerTag = 'auto'; }
