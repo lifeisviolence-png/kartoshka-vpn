@@ -131,7 +131,7 @@ export function toXrayOutbound(node) {
   const protocol = String(o.type || '').toLowerCase();
   if (!['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2'].includes(protocol)) failCode('config.protocol');
   const common = ['type','tag','server','server_port','tls','transport'];
-  const specific = { vless:['uuid','flow','encryption','packet_encoding'], vmess:['uuid','security','alter_id'], trojan:['password'], shadowsocks:['method','password'], hysteria2:['password','obfs'] };
+  const specific = { vless:['uuid','flow','encryption','packet_encoding'], vmess:['uuid','security','alter_id'], trojan:['password'], shadowsocks:['method','password'], hysteria2:['password','obfs','up','down','congestion'] };
   if (Object.keys(o).some(key => !common.includes(key) && !specific[protocol].includes(key))) failCode('config.nodeParams');
   const address = cleanHost(string(o.server, 'Не указан адрес сервера'));
   if (/\s|[\/@?#]/.test(address)) failCode('config.badAddress');
@@ -162,6 +162,10 @@ export function toXrayOutbound(node) {
     if (stream.security !== 'tls') failCode('config.hy2Tls');
     stream.network = 'hysteria';
     stream.hysteriaSettings = { version: 2, auth: typeof o.password === 'string' ? o.password : '' };
+    // Bandwidth and congestion are optional: absent means the core default.
+    if (typeof o.up === 'string' && o.up) stream.hysteriaSettings.up = o.up;
+    if (typeof o.down === 'string' && o.down) stream.hysteriaSettings.down = o.down;
+    if (typeof o.congestion === 'string' && o.congestion) stream.hysteriaSettings.congestion = o.congestion;
     if (o.obfs) {
       if (o.obfs.type !== 'salamander' || !o.obfs.password) failCode('config.hy2Obfs');
       stream.finalmask = { udp: [{ type: 'salamander', settings: { password: o.obfs.password } }] };

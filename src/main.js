@@ -567,6 +567,7 @@ function settingsMarkup() {
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.startup'))}</strong><small>${escapeHtml(t('settings.startupHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting muted"><div><strong>${escapeHtml(t('settings.autoReconnect'))}</strong><small>${escapeHtml(t('settings.autoReconnectHint'))}</small></div><span>${escapeHtml(t('settings.unavailable'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.dns'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.hint`))}</small></div><select id="dns-mode" aria-label="${escapeHtml(t('settings.dns'))}" ${busy() || state.connection === 'connected' || state.cleanupNeeded ? 'disabled' : ''}>${dnsModeIds.map((id) => `<option value="${id}" ${id === dnsMode ? 'selected' : ''}>${escapeHtml(t(`settings.dnsMode.${id}`))}</option>`).join('')}</select></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.failover'))}</strong></div><select id="failover-mode" aria-label="${escapeHtml(t('settings.failover'))}">${['country', 'any', 'never'].map((id) => `<option value="${id}" ${id === (state.settings?.failover || 'country') ? 'selected' : ''}>${escapeHtml(t(`settings.failoverMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
 }
@@ -703,6 +704,9 @@ function bindEvents() {
   });
   document.querySelector('#dns-mode')?.addEventListener('change', (event) => {
     if (dnsModeIds.includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), dns: event.target.value } }); render(); }
+  });
+  document.querySelector('#failover-mode')?.addEventListener('change', (event) => {
+    if (['country', 'any', 'never'].includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), failover: event.target.value } }); render(); }
   });
   document.querySelector('#language')?.addEventListener('change', (event) => {
     const language = event.target.value === 'en' ? 'en' : 'ru';
@@ -1202,6 +1206,14 @@ function appendLocalLog(message) {
   state.logs = [...state.logs, `${new Date().toLocaleTimeString()} ${message}`].slice(-500);
   if (state.page === 'logs') render();
 }
+// Pure policy: which node may replace the failed one. Kept separate so the
+// three modes are testable without a live tunnel.
+function failoverCandidate(servers, active, mode, isUsable) {
+  if (mode === 'never') return null;
+  const candidates = servers.filter((node) => node.id !== active?.id && isUsable(node));
+  if (mode === 'any') return candidates[0] || null;
+  return candidates.find((node) => node.country && node.country === active?.country) || null;
+}
 let lastHealthSwitch = 0;
 async function handleHealth(kind, payload) {
   if (kind === 'restarted') {
@@ -1210,13 +1222,17 @@ async function handleHealth(kind, payload) {
     return;
   }
   if (state.connection !== 'connected' || Date.now() - lastHealthSwitch < 60000) return;
-  // The core could not restart the tunnel: try the next node once a minute so a
-  // dead server does not leave the app connected to nothing.
-  const candidates = state.servers.filter((node) => node.id !== state.activeNode?.id && !unsupportedReason(node));
-  const next = candidates.find((node) => node.country && node.country === state.activeNode?.country) || candidates[0];
+  // The core could not restart the tunnel. Switching changes the exit country and
+  // the external IP, so it is a setting: same country by default.
+  const failover = state.settings?.failover === 'any' || state.settings?.failover === 'never' ? state.settings.failover : 'country';
+  if (failover === 'never') { state.proxyCheckFailed = true; setMessage('notice.healthNoSwitch', { error: errorText(payload) }); render(); return; }
+  const next = failoverCandidate(state.servers, state.activeNode, failover, (node) => !unsupportedReason(node));
   if (!next) { state.proxyCheckFailed = true; setMessage('notice.healthFailed', { error: errorText(payload) }); render(); return; }
   lastHealthSwitch = Date.now();
-  appendLocalLog(t('notice.healthSwitch', { name: next.name || t('servers.serverFallback') }));
+  const label = next.name || t('servers.serverFallback');
+  const country = next.country ? ` (${next.country})` : '';
+  appendLocalLog(t('notice.healthSwitch', { name: label }));
+  setMessage('notice.failoverSwitched', { name: label, country });
   await startSelected(next);
 }
 function handleProxyExit(message) {

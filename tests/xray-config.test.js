@@ -310,3 +310,59 @@ test('опции производительности: sniffing, IPv4 и TFO в�
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
 });
+
+// Real panel form: XHTTP tuning arrives as separate query keys, not inside extra.
+const xhttpQuery = `vless://${id}@example.test:443?type=xhttp&security=reality&pbk=${key}&fp=chrome&sni=example.test&sid=0123&path=%2Froute&host=cdn.example.test&mode=auto&x_padding_bytes=100-1000#XHTTPQuery`;
+test('XHTTP: параметры из query попадают в extra без предупреждений', () => {
+  const result = parseSubscriptionDetailed(xhttpQuery);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.warnings, []);
+  const node = result.nodes[0];
+  assert.equal(node.outbound.transport.extra.xPaddingBytes, '100-1000');
+  const built = buildXrayConfig([node], node.id, 'all');
+  assert.equal(built.outbounds[0].streamSettings.xhttpSettings.extra.xPaddingBytes, '100-1000');
+});
+test('XHTTP: extra=JSON имеет приоритет над query, типы приводятся', () => {
+  const mixed = `vless://${id}@example.test:443?type=xhttp&security=tls&sni=example.test&path=%2Fm&x_padding_bytes=100-1000&no_grpc_header=true&xmux=%7B%22maxConnections%22%3A1%7D&extra=${encodeURIComponent(JSON.stringify({ xPaddingBytes: 2048, xPaddingKey: 'x-fixture' }))}#Mixed`;
+  const result = parseSubscriptionDetailed(mixed);
+  assert.deepEqual(result.warnings, []);
+  const extra = result.nodes[0].outbound.transport.extra;
+  assert.equal(extra.xPaddingBytes, 2048);
+  assert.equal(extra.xPaddingKey, 'x-fixture');
+  assert.equal(extra.noGRPCHeader, true);
+  assert.deepEqual(extra.xmux, { maxConnections: 1 });
+});
+test('XHTTP: те же ключи на ws и grpc остаются предупреждением', () => {
+  for (const link of [
+    `vless://${id}@example.test:443?type=ws&security=tls&sni=example.test&path=%2Fws&x_padding_bytes=100-1000#WS`,
+    `vless://${id}@example.test:443?type=grpc&security=tls&sni=example.test&service=grpc&x_padding_bytes=100-1000#GRPC`
+  ]) {
+    const result = parseSubscriptionDetailed(link);
+    assert.deepEqual(result.errors, []);
+    assert.ok(result.warnings.some((w) => w.key === 'sub.unknownParam'), 'ожидалось предупреждение sub.unknownParam');
+  }
+});
+const hy2Tuned = `hy2://fixture-auth@example.test:443?sni=example.test&obfs=salamander&obfs-password=fixture-mask&up=50%20mbps&down=200%20mbps&congestion=bbr#HY2Tuned`;
+test('Hysteria2: up, down и congestion переносятся, без них полей нет', () => {
+  const tuned = parseSubscriptionDetailed(hy2Tuned);
+  assert.deepEqual(tuned.warnings, []);
+  const settings = tuned.nodes[0].outbound;
+  assert.equal(settings.up, '50 mbps');
+  assert.equal(settings.down, '200 mbps');
+  assert.equal(settings.congestion, 'bbr');
+  const plain = parseOne(hy2).outbound;
+  assert.equal(plain.up, undefined);
+  assert.equal(plain.down, undefined);
+  assert.equal(plain.congestion, undefined);
+});
+test('xray run -test принимает XHTTP из query и Hysteria2 с полосами', { skip: !process.env.XRAY_TEST_BIN }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kartovpn-fixes-'));
+  try {
+    for (const [index, link] of [xhttpQuery, hy2Tuned].entries()) {
+      const path = join(dir, `${index}.json`);
+      writeFileSync(path, JSON.stringify(config(link)), { mode: 0o600 });
+      const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `ядро отклонило конфигурацию ${index}: ${result.stderr} ${result.stdout}`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
