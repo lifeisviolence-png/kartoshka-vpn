@@ -127,12 +127,13 @@ function transport(p) {
   if (type !== 'xhttp' && type !== 'splithttp') { for (const key of p.keys()) if (isXhttpKey(key)) issue('sub.unknownParam'); }
   if (type === 'xhttp' || type === 'splithttp') {
     allow(!(service || authority));
-    let extras;
-    if (extra !== undefined && extra !== '') { try { extras = JSON.parse(extra); } catch { issue('sub.badXhttpExtra'); } }
+    let jsonExtra;
+    if (extra !== undefined && extra !== '') { try { jsonExtra = JSON.parse(extra); } catch { issue('sub.badXhttpExtra'); } }
     const fromQuery = xhttpQueryExtra(p);
-    // extra=JSON wins over the flat query keys when both are present.
-    if (Object.keys(fromQuery).length) extras = { ...fromQuery, ...(extras || {}) };
-    return { type: 'xhttp', ...(path !== undefined && path !== '' ? { path } : {}), ...(host !== undefined && host !== '' ? { host } : {}), ...(mode !== undefined && mode !== '' ? { mode } : {}), ...(extras !== undefined ? { extra: extras } : {}) };
+    // extra=JSON wins over the flat query keys when both are present. The two
+    // sources are also kept apart so the XHTTP setting can use only extra=JSON.
+    const extras = { ...fromQuery, ...(jsonExtra || {}) };
+    return { type: 'xhttp', ...(path !== undefined && path !== '' ? { path } : {}), ...(host !== undefined && host !== '' ? { host } : {}), ...(mode !== undefined && mode !== '' ? { mode } : {}), ...(Object.keys(extras).length ? { extra: extras } : {}), ...(Object.keys(fromQuery).length ? { extraFromQuery: fromQuery } : {}), ...(jsonExtra !== undefined ? { extraJson: jsonExtra } : {}) };
   }
   if (type === 'ws' || type === 'websocket') { allow(!(extra || service || authority)); return { type: 'ws', path: path || '/', ...(host ? { headers: { Host: host } } : {}) }; }
   if (type === 'grpc') {

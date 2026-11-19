@@ -476,6 +476,16 @@ const strings = {
     'notice.fastReconnectDisabled': 'Быстрое повторное соединение отключено: сеть его не поддерживает',
     'notice.dnsFallback': 'Защита DNS не сработала, использован обычный DNS',
     'action.reconnect': 'Переподключить',
+    'settings.xhttpQuery': 'Параметры XHTTP из ссылки',
+    'settings.xhttpQueryHint': 'Передавать padding, mode и другие XHTTP-ключи из query-параметров ссылки. Если выключено, используется только extra=JSON (поведение 0.9.2).',
+    'logs.diagnostics': 'Диагностика proxy',
+    'logs.diagnosticsHint': 'Нажмите «Обновить», чтобы прочитать настройки proxy.',
+    'logs.diagnosticsFailed': 'Не удалось прочитать диагностику: {error}',
+    'logs.copyDiagnostics': 'Скопировать диагностику',
+    'logs.copyDiagnosticsDone': 'Диагностика скопирована (секреты замаскированы)',
+    'logs.copyDiagnosticsFailed': 'Не удалось скопировать диагностику',
+    'logs.proxyWarningLine': 'Предупреждение proxy: {text}',
+    'logs.xhttpLine': 'XHTTP: path={path}, mode={mode}, host={host}, extra=[{keys}]; ядро {core}',
   },
   en: {
     'home.dnsProtection': 'DNS protection',
@@ -948,7 +958,17 @@ const strings = {
     'toast.undo': 'Undo',
     'state.restoringBeforeDelete': 'Disconnecting before deleting the subscription…',
     'err.coreRussian': 'The core reported (in Russian): {text}',
-    'err.config.noSelection': 'The selected server was not found'
+    'err.config.noSelection': 'The selected server was not found',
+    'settings.xhttpQuery': 'XHTTP parameters from the link',
+    'settings.xhttpQueryHint': 'Pass padding, mode and other XHTTP keys from the link query to the core. When off, only extra=JSON is used (0.9.2 behaviour).',
+    'logs.diagnostics': 'Proxy diagnostics',
+    'logs.diagnosticsHint': 'Press Refresh to read the proxy settings.',
+    'logs.diagnosticsFailed': 'Could not read diagnostics: {error}',
+    'logs.copyDiagnostics': 'Copy diagnostics',
+    'logs.copyDiagnosticsDone': 'Diagnostics copied (secrets masked)',
+    'logs.copyDiagnosticsFailed': 'Could not copy diagnostics',
+    'logs.proxyWarningLine': 'Proxy warning: {text}',
+    'logs.xhttpLine': 'XHTTP: path={path}, mode={mode}, host={host}, extra=[{keys}]; core {core}'
   }
 };
 

@@ -8,8 +8,8 @@ const directScheme = /^(vless|vmess|trojan|ss|hysteria2):\/\//i;
 export const desktopBridge = {
   async connect({ config, debug = false }) {
     if (!isDesktop) return { ok: false, demo: true, error: t('bridge.previewProxy') };
-    await invoke('start_proxy', { configJson: JSON.stringify(config), debug: Boolean(debug) });
-    return { ok: true, native: true };
+    const warning = await invoke('start_proxy', { configJson: JSON.stringify(config), debug: Boolean(debug) });
+    return { ok: true, native: true, warning: warning || null };
   },
   async disconnect() {
     if (!isDesktop) return { ok: true, demo: true };
@@ -104,6 +104,14 @@ export const desktopBridge = {
   async readLogs() {
     if (!isDesktop) return '';
     return invoke('read_logs');
+  },
+  async proxyDiagnostics() {
+    if (!isDesktop) return '';
+    return invoke('proxy_diagnostics');
+  },
+  async collectDiagnosticsFile() {
+    if (!isDesktop) return '';
+    return invoke('collect_diagnostics');
   },
   async watchProxyExit(callback) {
     if (!isDesktop) return () => {};
