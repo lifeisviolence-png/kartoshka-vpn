@@ -56,6 +56,19 @@ export const desktopBridge = {
     await invoke('quit_app');
     return { ok: true };
   },
+  async checkClientUpdate() {
+    if (!isDesktop) throw new Error(t('settings.clientUpdatePreview'));
+    return invoke('check_client_update');
+  },
+  async installClientUpdate(version) {
+    if (!isDesktop) throw new Error(t('settings.clientUpdatePreview'));
+    await invoke('install_client_update', { version: String(version) });
+    return { ok: true };
+  },
+  async watchClientUpdate(callback) {
+    if (!isDesktop) return () => {};
+    return listen('client-update-progress', (event) => callback(event.payload));
+  },
   async openExternal(url) {
     if (!isDesktop) { window.open(url, '_blank', 'noopener'); return { ok: true, preview: true }; }
     await invoke('open_external', { url: String(url) });

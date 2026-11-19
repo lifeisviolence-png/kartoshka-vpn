@@ -79,7 +79,8 @@ const state = {
   proxyDiagnostics: '',
   proxyWarning: '',
   coreVersion: '',
-  message: { key: capabilities.native ? 'state.checkingProxy' : 'state.previewNoConnect' }
+  message: { key: capabilities.native ? 'state.checkingProxy' : 'state.previewNoConnect' },
+  clientUpdate: { status: 'idle', info: null, error: '', progress: 0 }
 };
 // Effective values: stored settings stay untouched until the user flips a switch,
 // so a migration never rewrites the old settings object.
@@ -640,6 +641,39 @@ function serversMarkup(node) {
   </div>`;
 }
 
+function clientUpdateMarkup() {
+  const update = state.clientUpdate || {};
+  const info = update.info;
+  const status = update.status || 'idle';
+  let statusText = t('settings.clientUpdateUnknown');
+  if (status === 'checking') statusText = t('settings.checkingClientUpdate');
+  else if (status === 'downloading') statusText = t('settings.clientUpdateDownloading');
+  else if (status === 'installing') statusText = t('settings.clientUpdateInstalling');
+  else if (status === 'error') statusText = t('settings.clientUpdateError', { error: update.error || '' });
+  else if (info?.available) statusText = t('settings.clientUpdateAvailable', { version: info.latestVersion });
+  else if (info) statusText = t('settings.clientUpdateCurrent');
+  const notes = info?.available && info.notes
+    ? `<div class="update-notes"><strong>${escapeHtml(t('settings.clientUpdateNotes'))}</strong><div>${escapeHtml(info.notes)}</div></div>`
+    : '';
+  const reason = info?.available && info.reason
+    ? `<small class="warn">${escapeHtml(info.reason)}</small>`
+    : '';
+  const disabled = status === 'checking' || status === 'downloading' || status === 'installing';
+  const installDisabled = disabled || !info?.canInstall || busy() || state.connection !== 'idle' || state.cleanupNeeded;
+  const install = info?.available
+    ? `<button class="button small" id="install-client-update" ${installDisabled ? 'disabled' : ''}>${icon('download', 14)}${escapeHtml(t('settings.clientUpdateDownload'))}</button>`
+    : '';
+  const release = info?.releaseUrl
+    ? `<button class="button small" data-action="open-client-release">${escapeHtml(t('settings.clientUpdateOpen'))}</button>`
+    : '';
+  const isMac = /Mac/i.test(globalThis.navigator?.platform || globalThis.navigator?.userAgent || '');
+  const admin = isMac ? `<div class="setting"><small>${escapeHtml(t('settings.clientUpdateAdmin'))}</small></div>` : '';
+  return `<div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.clientUpdate'))}</span></div>
+    <div class="setting"><div><strong>${escapeHtml(t('settings.clientVersion'))}</strong></div><span class="mono">${escapeHtml(VERSION)}</span></div>
+    <div class="setting"><div><strong>${escapeHtml(statusText)}</strong><small>${escapeHtml(t('settings.clientUpdateHint'))}</small>${reason}${notes}</div><div class="row-actions"><button class="button small" id="check-client-update" ${disabled ? 'disabled' : ''}>${icon('refresh', 14)}${escapeHtml(t('settings.checkClientUpdate'))}</button>${install}${release}</div></div>
+    ${admin}
+  </div>`;
+}
 function settingsMarkup() {
   const nodeMode = state.settings?.nodeMode === 'auto' ? 'auto' : 'single';
   const dnsMode = dnsModeIds.includes(state.settings?.dns) ? state.settings.dns : 'system';
@@ -662,6 +696,7 @@ function settingsMarkup() {
       <div class="setting"><div><strong>${escapeHtml(t('settings.storage'))}</strong><small>${escapeHtml(t('settings.storageHint', { count: state.servers.length, subs: state.subscriptions.length }))}</small></div><button class="button small danger" data-action="clear-data">${icon('trash', 14)}${escapeHtml(t('settings.clearData'))}</button></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.version'))}</strong><small>${escapeHtml(t('settings.versionHint'))}</small></div><span class="mono">${escapeHtml(VERSION)}</span></div>
     </div>
+    ${clientUpdateMarkup()}
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.automation'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.autostart'))}</strong><small>${escapeHtml(t('settings.autostartHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-autostart" ${state.settings?.autostart ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.autoconnect'))}</strong><small>${escapeHtml(t('settings.autoconnectHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-autoconnect" ${state.settings?.autoconnect ? 'checked' : ''}/><span></span></label></div>
@@ -841,6 +876,12 @@ function bindEvents() {
     commitData({ settings: { ...(state.settings || {}), closeToTray } });
     try { await desktopBridge.setCloseToTray(closeToTray); } catch { /* preview */ }
     render();
+  });
+  document.querySelector('#check-client-update')?.addEventListener('click', () => { void checkClientUpdate(); });
+  document.querySelector('#install-client-update')?.addEventListener('click', () => { void installClientUpdate(); });
+  document.querySelector('[data-action="open-client-release"]')?.addEventListener('click', () => {
+    const url = state.clientUpdate?.info?.releaseUrl;
+    if (url) void desktopBridge.openExternal(url).catch(() => {});
   });
   document.querySelector('#auto-update-hours')?.addEventListener('change', (event) => {
     const hours = Math.max(0, Math.min(168, Number(event.target.value) || 0));
@@ -1284,6 +1325,55 @@ async function collectDiagnostics() {
     return lines.join('\n');
   } catch { return ''; }
 }
+async function checkClientUpdate() {
+  if (!NATIVE) {
+    state.clientUpdate = { status: 'error', info: null, error: t('settings.clientUpdatePreview'), progress: 0 };
+    render();
+    return;
+  }
+  if (state.clientUpdate?.status === 'checking' || state.clientUpdate?.status === 'downloading' || state.clientUpdate?.status === 'installing') return;
+  state.clientUpdate = { ...(state.clientUpdate || {}), status: 'checking', error: '', progress: 0 };
+  render();
+  try {
+    const info = await desktopBridge.checkClientUpdate();
+    state.clientUpdate = { status: info?.available ? 'available' : 'current', info: info || null, error: '', progress: 0 };
+  } catch (error) {
+    state.clientUpdate = { ...(state.clientUpdate || {}), status: 'error', error: errorText(error) };
+  }
+  render();
+}
+async function installClientUpdate() {
+  const info = state.clientUpdate?.info;
+  if (!info?.available || !info.canInstall) return;
+  if (state.connection !== 'idle' || busy() || state.cleanupNeeded) {
+    state.notice = { type: 'error', text: t('settings.clientUpdateBlocked') };
+    render();
+    return;
+  }
+  state.clientUpdate = { ...state.clientUpdate, status: 'downloading', error: '', progress: 0 };
+  render();
+  try {
+    await desktopBridge.installClientUpdate(info.latestVersion);
+    state.clientUpdate = { ...state.clientUpdate, status: 'installing' };
+    render();
+    window.setTimeout(() => { void desktopBridge.quitApp().catch(() => {}); }, 1000);
+  } catch (error) {
+    state.clientUpdate = { ...state.clientUpdate, status: 'error', error: errorText(error) };
+    render();
+  }
+}
+function handleClientUpdateProgress(payload) {
+  if (!payload) return;
+  const status = payload.stage === 'ready' ? 'installing' : payload.stage === 'downloading' ? 'downloading' : (state.clientUpdate?.status || 'idle');
+  const total = Number(payload.total || 0);
+  const downloaded = Number(payload.downloaded || 0);
+  state.clientUpdate = {
+    ...(state.clientUpdate || {}),
+    status,
+    progress: total > 0 ? Math.min(100, Math.round(downloaded / total * 100)) : 0
+  };
+  if (state.activeNav === 'settings') render();
+}
 function autoPool(selected) {
   if (state.settings?.nodeMode !== 'auto' || !selected) return [];
   const usable = state.servers.filter((item) => item.id !== selected.id && !unsupportedReason(item) && !item.unsupported);
@@ -1532,6 +1622,7 @@ void (async () => {
   try { await desktopBridge.watchProxyExit(handleProxyExit); } catch (error) { watchError = errorText(error); }
   try { await desktopBridge.watchHealth(handleHealth); } catch { /* события доступны только в настольной сборке */ }
   try { await desktopBridge.watchTray({ onToggle: () => { void toggleConnection(); }, onQuit: () => { void desktopBridge.quitApp(); } }); } catch { /* трей только в настольной сборке */ }
+  try { await desktopBridge.watchClientUpdate(handleClientUpdateProgress); } catch { /* обновления только в настольной сборке */ }
   state.watchError = watchError;
   if (!capabilities.native) { state.bridgeReady = !watchError; if (watchError) { state.connection = 'error'; setMessage('state.watchFailed', { error: watchError }); } setMessage('state.previewNoConnect'); render(); return; }
   // The bridge has no status query. On a frontend reload, stop any surviving session before

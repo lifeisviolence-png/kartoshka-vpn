@@ -2,6 +2,7 @@
 
 mod country;
 mod doh;
+mod updater;
 
 use std::{fs, io::Write, net::TcpStream as StdTcpStream, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime}};
 use serde::{Deserialize, Serialize};
@@ -942,6 +943,14 @@ fn open_external(url: String) -> Result<(), String> {
 fn quit_app(app: AppHandle) {
     app.exit(0);
 }
+#[tauri::command]
+async fn check_client_update(app: AppHandle) -> Result<updater::ClientUpdateInfo, String> {
+    updater::check_client_update(app).await
+}
+#[tauri::command]
+async fn install_client_update(app: AppHandle, version: String) -> Result<(), String> {
+    updater::install_client_update(app, version).await
+}
 fn append_log(app: &AppHandle, message: &str) {
     if let Ok(dir) = app.path().app_config_dir() {
         let _ = fs::create_dir_all(&dir);
@@ -1747,6 +1756,10 @@ fn main() {
             }
         }
     }
+    if args.get(1).map(|s| s == "--client-update-install").unwrap_or(false) {
+        let result = updater::run_install_helper(&args);
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
     if args.get(1).map(|s| s == "--proxy-watchdog-v1").unwrap_or(false) {
         let result = (|| -> Result<(), String> {
             if args.len() != 7 { return Err("Неверные параметры watchdog".into()); }
@@ -1758,7 +1771,7 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let _instance = match windows::one_instance() { Ok(v) => v, Err(e) => { windows::show_error(&e); return; } };
-    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![open_external, set_autostart, autostart_enabled, set_close_to_tray, set_tray_active, quit_app, load_secure_state, save_secure_state, reset_secure_state, fetch_subscription, resolve_host, dns_check, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, proxy_diagnostics, collect_diagnostics, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
+    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![open_external, set_autostart, autostart_enabled, set_close_to_tray, set_tray_active, quit_app, load_secure_state, save_secure_state, reset_secure_state, fetch_subscription, resolve_host, dns_check, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, proxy_diagnostics, collect_diagnostics, lookup_countries, probe_node_latency, start_proxy, stop_proxy, check_client_update, install_client_update]).setup(|app| {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }
