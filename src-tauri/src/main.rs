@@ -1076,6 +1076,9 @@ fn launch_watchdog(path: &Path, core: &Child) -> Result<Child, String> {
     // GUI dies, that job kills Xray and must not kill the watchdog. Membership in an
     // outer launcher job (Task Scheduler, installer, corporate launcher) is allowed;
     // such a job also outlives a GUI crash, and its own termination kills the GUI too.
+    // macOS has no Job Object; its watchdog is independent by construction and
+    // the Windows production check below would always be true there.
+    #[cfg(not(target_os = "macos"))]
     if windows::core_in_job(&watcher).unwrap_or(true) {
         let _ = stop_child(&mut watcher);
         return Err("Watchdog остался в защитном Job Object приложения; proxy не включён".into());
@@ -1746,14 +1749,14 @@ fn main() {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }
-            else if points_to_local_proxy()? { Err("Windows указывает на 127.0.0.1:2080 без snapshot; источник и исходные настройки неизвестны".into()) }
+            else if points_to_local_proxy()? { Err("Системный proxy указывает на 127.0.0.1:2080 без snapshot; источник и исходные настройки неизвестны".into()) }
             else { Ok(false) }
         }) {
-            Ok(true) => append_log(handle, "Сохранённые настройки Windows proxy восстановлены"),
+            Ok(true) => append_log(handle, "Сохранённые настройки системного proxy восстановлены"),
             Ok(false) => {},
             Err(e) => {
                 append_log(handle, &format!("ОШИБКА восстановления proxy: {e}; запуск соединения заблокирован"));
-                windows::show_error(&format!("Не удалось восстановить системный proxy: {e}\n\nПодключение заблокировано. Проверьте настройки Windows вручную и не меняйте настройки другого VPN без проверки. Если snapshot существует, он сохранён."));
+                windows::show_error(&format!("Не удалось восстановить системный proxy: {e}\n\nПодключение заблокировано. Проверьте настройки proxy вручную и не меняйте настройки другого VPN без проверки. Если snapshot существует, он сохранён."));
             },
         }
         let open = tauri::menu::MenuItem::with_id(app, "open", "Открыть", true, None::<&str>)?;
@@ -1808,12 +1811,12 @@ fn main() {
                     let prevent = guard.child.is_some() && matches!(event, RunEvent::ExitRequested { .. });
                     if prevent { if let RunEvent::ExitRequested { api, .. } = &event { api.prevent_exit(); } }
                     append_log(app, &format!("ОШИБКА восстановления при выходе: {e}"));
-                    windows::show_error(&format!("Не удалось восстановить proxy при выходе: {e}\n\n{}Проверьте настройки Windows вручную, не перезаписывая чужой VPN.", if prevent { "Выход отменён: завершение Xray может оставить Windows без связи. Устраните конфликт и повторите отключение. " } else { "" }));
+                    windows::show_error(&format!("Не удалось восстановить proxy при выходе: {e}\n\n{}Проверьте настройки proxy вручную, не перезаписывая чужой VPN.", if prevent { "Выход отменён: завершение Xray может оставить систему без связи. Устраните конфликт и повторите отключение. " } else { "" }));
                 }
             }, Err(_) => {
                 if let RunEvent::ExitRequested { api, .. } = &event { api.prevent_exit(); }
                 append_log(app, "ОШИБКА блокировки при выходе");
-                windows::show_error("Не удалось проверить и восстановить proxy при выходе. Выход отменён; проверьте настройки Windows вручную.");
+                windows::show_error("Не удалось проверить и восстановить proxy при выходе. Выход отменён; проверьте настройки proxy вручную.");
             } } }
         }
     });

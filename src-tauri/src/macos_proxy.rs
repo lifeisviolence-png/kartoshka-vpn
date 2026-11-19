@@ -199,6 +199,18 @@ pub fn watchdog_creation_flags() -> Result<u32, String> {
 }
 
 pub fn show_error(message: &str) {
+    if std::env::var_os("KARTOVPN_WATCHDOG_NO_MODAL").is_none() {
+        let escaped = message
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ");
+        let script = format!(
+            "display alert \"КартошкаVPN\" message \"{escaped}\" as critical buttons {{\"OK\"}} default button \"OK\""
+        );
+        let _ = Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .status();
+    }
     eprintln!("{message}");
 }
 
@@ -802,6 +814,10 @@ pub fn watchdog(path: &Path, parent: (u32, u64), core: (u32, u64)) -> Result<(),
     if !alive(parent.0) || !alive(core.0) {
         return Err("Процесс завершился до готовности watchdog".into());
     }
+    // PID alone is not an identity: macOS can reuse it. Remember the executable
+    // paths and treat a different path as process death before restoring.
+    let parent_path = process_path(parent.0);
+    let core_path = process_path(core.0);
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut byte = [0u8; 1];
@@ -817,12 +833,26 @@ pub fn watchdog(path: &Path, parent: (u32, u64), core: (u32, u64)) -> Result<(),
         if receiver.try_recv().is_ok() {
             return Ok(());
         }
-        if !alive(parent.0) || !alive(core.0) {
+        let parent_gone = !alive(parent.0)
+            || parent_path
+                .as_ref()
+                .map(|path| process_path(parent.0).as_ref() != Some(path))
+                .unwrap_or(false);
+        let core_gone = !alive(core.0)
+            || core_path
+                .as_ref()
+                .map(|path| process_path(core.0).as_ref() != Some(path))
+                .unwrap_or(false);
+        if parent_gone || core_gone {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let parent_alive = alive(parent.0);
+    let parent_alive = alive(parent.0)
+        && parent_path
+            .as_ref()
+            .map(|path| process_path(parent.0).as_ref() == Some(path))
+            .unwrap_or(true);
     let recovered = lock().and_then(|_lock| {
         if path.exists() {
             super::restore_snapshot_locked(path)
