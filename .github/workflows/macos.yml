@@ -97,6 +97,7 @@ jobs:
           grep -q 'arm64' /tmp/app-lipo.txt
           grep -q 'x86_64' /tmp/xray-lipo.txt
           grep -q 'arm64' /tmp/xray-lipo.txt
+          "$app/Contents/MacOS/kartoshka-vpn" --mac-self-test
           shasum -a 256 "$dmg"
           version=$(node -p "require('./package.json').version")
           cp "$dmg" "KartoshkaVPN_${version}_universal.dmg"

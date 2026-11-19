@@ -1734,6 +1734,19 @@ async fn probe_node_latency(app: AppHandle, config_json: String) -> Result<u32, 
 fn main() {
     // The watchdog is the same installed executable, dispatched before Tauri or GUI init.
     let args: Vec<_> = std::env::args_os().collect();
+    #[cfg(target_os = "macos")]
+    if args.get(1).map(|s| s == "--mac-self-test").unwrap_or(false) {
+        match macos_proxy::capture() {
+            Ok(snapshot) => {
+                println!("macOS proxy self-test: {} network service(s)", snapshot.services.len());
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("macOS proxy self-test failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.get(1).map(|s| s == "--proxy-watchdog-v1").unwrap_or(false) {
         let result = (|| -> Result<(), String> {
             if args.len() != 7 { return Err("Неверные параметры watchdog".into()); }
