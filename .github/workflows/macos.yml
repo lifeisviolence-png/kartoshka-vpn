@@ -63,9 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           pnpm run build
-          node --test tests/xray-config.test.js tests/xray-proxy.integration.test.js
-          node --test tests/frontend-regressions.test.js
-          node --test tests/countries.test.js tests/state-model.test.js tests/i18n.test.js tests/version.test.js
+          node --test tests/*.test.js
       - name: Rust unit tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Build universal DMG
@@ -93,6 +91,12 @@ jobs:
           test -f "$app/Contents/Resources/country-ipv4.bin.gz"
           file "$app/Contents/MacOS/kartoshka-vpn"
           file "$app/Contents/MacOS/xray"
+          lipo -info "$app/Contents/MacOS/kartoshka-vpn" | tee /tmp/app-lipo.txt
+          lipo -info "$app/Contents/MacOS/xray" | tee /tmp/xray-lipo.txt
+          grep -q 'x86_64' /tmp/app-lipo.txt
+          grep -q 'arm64' /tmp/app-lipo.txt
+          grep -q 'x86_64' /tmp/xray-lipo.txt
+          grep -q 'arm64' /tmp/xray-lipo.txt
           shasum -a 256 "$dmg"
           version=$(node -p "require('./package.json').version")
           cp "$dmg" "KartoshkaVPN_${version}_universal.dmg"
@@ -124,7 +128,6 @@ jobs:
           dmg=$(find release-assets -name '*.dmg' -print -quit)
           test -n "$dmg" || { echo 'DMG artifact is empty'; exit 1; }
           name=$(basename "$dmg")
-          cp "$dmg" "release-assets/$name"
           ( cd release-assets && sha256sum "$name" > SHA256SUMS-macos.txt && cat SHA256SUMS-macos.txt )
           tag="${GITHUB_REF_NAME}"
           for _ in $(seq 1 60); do

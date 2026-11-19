@@ -22,7 +22,15 @@ struct RawValue { kind: u32, bytes: Vec<u8> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Change { name: String, before: Option<RawValue>, applied: Option<RawValue>, managed: bool }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ProxySnapshot { version: u32, changes: Vec<Change>, before_flags: u32, applied_flags: u32 }
+struct ProxySnapshot {
+    version: u32,
+    changes: Vec<Change>,
+    before_flags: u32,
+    applied_flags: u32,
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    mac: Option<macos_proxy::Snapshot>,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -345,6 +353,8 @@ mod windows {
 #[cfg(target_os = "macos")]
 #[path = "macos_proxy.rs"]
 mod windows;
+#[cfg(target_os = "macos")]
+use self::windows as macos_proxy;
 #[cfg(all(not(windows), not(target_os = "macos")))]
 mod windows {
     use super::RawValue;
@@ -371,6 +381,7 @@ mod windows {
 
 fn dword(value: u32) -> Option<RawValue> { Some(RawValue { kind: 4, bytes: value.to_le_bytes().to_vec() }) }
 fn text(value: &str) -> Option<RawValue> { Some(RawValue { kind: 1, bytes: value.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect() }) }
+#[cfg(not(target_os = "macos"))]
 fn capture_proxy() -> Result<ProxySnapshot, String> {
     let before_flags = windows::flags()?;
     let mut changes = Vec::new();
@@ -390,6 +401,20 @@ fn capture_proxy() -> Result<ProxySnapshot, String> {
     if has_pac(after_flags) != has_pac(before_flags) { return Err("Флаги WinINet изменились во время создания snapshot".into()); }
     Ok(ProxySnapshot { version: 2, changes, before_flags, applied_flags: 2 })
 }
+#[cfg(target_os = "macos")]
+fn capture_proxy() -> Result<ProxySnapshot, String> {
+    // macOS has per-service proxy state; five aggregate values cannot restore
+    // it exactly. Keep the complete service snapshot in the same encrypted
+    // transaction file and let the macOS branches below do the writes.
+    let mac = macos_proxy::capture()?;
+    Ok(ProxySnapshot {
+        version: 3,
+        changes: Vec::new(),
+        before_flags: 0,
+        applied_flags: 2,
+        mac: Some(mac),
+    })
+}
 fn registry_text(value: &Option<RawValue>) -> Option<String> {
     let value = value.as_ref()?;
     if value.kind != 1 { return None; }
@@ -407,6 +432,10 @@ fn indicator_on(value: &Option<RawValue>) -> bool {
 // corporate images; both are captured, switched off for the session and restored
 // afterwards, so blocking on them would make the app unusable on a clean system.
 fn require_no_foreign_proxy(snapshot: &ProxySnapshot) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(mac) = &snapshot.mac {
+        return macos_proxy::require_no_foreign_proxy(mac);
+    }
     let before = |name: &str| snapshot.changes.iter().find(|c| c.name == name).and_then(|c| c.before.clone());
     let server = registry_text(&before("ProxyServer")).unwrap_or_default();
     let server = server.trim().to_string();
@@ -471,6 +500,7 @@ fn wait_local_proxy(timeout: Duration) -> u32 {
         std::thread::sleep(Duration::from_millis(25));
     }
 }
+#[cfg(not(target_os = "macos"))]
 fn registry_value_text(name: &str) -> String {
     match windows::get(name) {
         Ok(Some(value)) if value.kind == 1 => registry_text(&Some(value)).unwrap_or_default(),
@@ -480,11 +510,14 @@ fn registry_value_text(name: &str) -> String {
         Err(e) => format!("<ошибка: {e}>"),
     }
 }
+#[cfg(not(target_os = "macos"))]
 fn proxy_dump() -> String {
     let flags = windows::flags().map(|value| value.to_string()).unwrap_or_else(|e| format!("<ошибка: {e}>"));
     format!("flags={flags}; AutoConfigURL={}; AutoDetect={}; ProxyEnable={}; ProxyServer={}; ProxyOverride={}",
         registry_value_text("AutoConfigURL"), registry_value_text("AutoDetect"), registry_value_text("ProxyEnable"), registry_value_text("ProxyServer"), registry_value_text("ProxyOverride"))
 }
+#[cfg(target_os = "macos")]
+fn proxy_dump() -> String { macos_proxy::dump_current() }
 // The registry value is the source of truth for a PAC URL. The WinINet query
 // can keep returning a script from DefaultConnectionSettings after the value was
 // removed, which would falsely block a clean start (the 0.9.6 report).
@@ -530,6 +563,14 @@ fn load_snapshot(path: &Path) -> Result<ProxySnapshot, String> {
         }
     }
     let snapshot: ProxySnapshot = serde_json::from_slice(&data).map_err(|e| format!("Неизвестный или повреждённый snapshot; сохранён для ручного восстановления: {e}"))?;
+    #[cfg(target_os = "macos")]
+    if let Some(mac) = &snapshot.mac {
+        if snapshot.version != 3 || !snapshot.changes.is_empty() || snapshot.before_flags != 0 || snapshot.applied_flags != 2 {
+            return Err("Неизвестный или повреждённый формат macOS snapshot; требуется ручное восстановление".into());
+        }
+        mac.validate()?;
+        return Ok(snapshot);
+    }
     if snapshot.version != 2 || snapshot.applied_flags != 2 || snapshot.changes.len() != NAMES.len() || !snapshot.changes.iter().zip(NAMES).all(|(c, n)| {
         if c.name != n { return false; }
         match n {
@@ -548,8 +589,14 @@ fn restore_snapshot(path: &Path) -> Result<(), String> {
     restore_snapshot_locked(path)
 }
 fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
-    if !path.exists() { return Err("Snapshot исчез; восстановление невозможно, проверьте proxy Windows вручную".into()); }
+    if !path.exists() { return Err("Snapshot исчез; восстановление невозможно, проверьте системный proxy вручную".into()); }
     let snapshot = load_snapshot(path)?;
+    #[cfg(target_os = "macos")]
+    if let Some(mac) = &snapshot.mac {
+        macos_proxy::restore(mac)?;
+        fs::remove_file(path).map_err(|e| format!("Настройки macOS восстановлены, но snapshot не удалён: {e}"))?;
+        return Ok(());
+    }
     let flags = windows::flags()?;
     // FLAGS is derived: a configured server adds the proxy bit even while
     // ProxyEnable=0, so only the PAC/auto-detect bits change the meaning here.
@@ -640,6 +687,11 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     fs::remove_file(path).map_err(|e| format!("Настройки восстановлены, но snapshot не удалён: {e}"))
 }
 fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog: &mut Child) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(mac) = &snapshot.mac {
+        store_proxy_dump(&macos_proxy::dump(mac));
+        return macos_proxy::apply(mac, fail_after, watchdog);
+    }
     store_proxy_dump(&proxy_dump());
     // Detect changes since capture, including the bypass list, before making writes.
     for c in &snapshot.changes {
@@ -714,6 +766,7 @@ fn secure_state_path(app: &AppHandle) -> Result<PathBuf, String> {
 // Subscription URLs, UUIDs and passwords never go to localStorage or a plain
 // file: the snapshot is encrypted with DPAPI (current Windows user) and only the
 // ciphertext is written. The plaintext text stays in memory and is never logged.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn load_secure_state(app: AppHandle) -> Result<Option<String>, String> {
     let path = secure_state_path(&app)?;
@@ -731,6 +784,7 @@ fn load_secure_state(app: AppHandle) -> Result<Option<String>, String> {
     if text.len() > SECURE_STATE_LIMIT { return Err("Хранилище настроек повреждено".into()); }
     Ok(Some(text))
 }
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn save_secure_state(app: AppHandle, contents: String) -> Result<(), String> {
     if contents.len() > SECURE_STATE_LIMIT { return Err("Состояние приложения слишком велико".into()); }
@@ -749,6 +803,7 @@ fn save_secure_state(app: AppHandle, contents: String) -> Result<(), String> {
 }
 // A profile locked to another Windows user cannot be decrypted. The app offers
 // a fresh start instead of crashing; the old file is kept next to the new one.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn reset_secure_state(app: AppHandle) -> Result<(), String> {
     let path = secure_state_path(&app)?;
@@ -756,6 +811,54 @@ fn reset_secure_state(app: AppHandle) -> Result<(), String> {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let backup = path.with_extension(format!("enc.locked-{stamp}"));
     fs::rename(&path, &backup).map_err(|e| format!("Не удалось сохранить архив старого хранилища: {e}"))?;
+    Ok(())
+}
+
+// macOS has no DPAPI. Secrets are stored as a login Keychain generic-password
+// item, never in a plaintext file. A legacy 0.9.8 test file is migrated once and
+// removed after the Keychain write succeeds.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn load_secure_state(app: AppHandle) -> Result<Option<String>, String> {
+    let bytes = match macos_proxy::keychain_load()? {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => {
+            let path = secure_state_path(&app)?;
+            if !path.exists() { return Ok(None); }
+            let raw = fs::read(&path).map_err(|e| format!("Не удалось прочитать хранилище: {e}"))?;
+            if raw.is_empty() { return Ok(None); }
+            let plain = if let Some(encrypted) = raw.strip_prefix(b"KPV3-DPAPI\0") {
+                macos_proxy::unprotect(encrypted).map_err(|_| "state.locked".to_string())?
+            } else {
+                raw
+            };
+            macos_proxy::keychain_save(&plain)?;
+            let _ = fs::remove_file(&path);
+            plain
+        }
+    };
+    if bytes.len() > SECURE_STATE_LIMIT { return Err("Хранилище настроек повреждено".into()); }
+    let text = String::from_utf8(bytes).map_err(|_| "state.locked".to_string())?;
+    Ok(Some(text))
+}
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn save_secure_state(_app: AppHandle, contents: String) -> Result<(), String> {
+    if contents.len() > SECURE_STATE_LIMIT { return Err("Состояние приложения слишком велико".into()); }
+    let root: serde_json::Value = serde_json::from_str(&contents).map_err(|_| "Состояние приложения повреждено".to_string())?;
+    if !root.is_object() { return Err("Состояние приложения повреждено".into()); }
+    macos_proxy::keychain_save(contents.as_bytes())
+}
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn reset_secure_state(app: AppHandle) -> Result<(), String> {
+    macos_proxy::keychain_delete()?;
+    let path = secure_state_path(&app)?;
+    if path.exists() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let backup = path.with_extension(format!("enc.locked-{stamp}"));
+        fs::rename(&path, &backup).map_err(|e| format!("Не удалось сохранить архив старого хранилища: {e}"))?;
+    }
     Ok(())
 }
 
@@ -992,7 +1095,7 @@ fn stop_runtime(runtime: &mut ProxyRuntime) -> Result<(), String> {
     if let Some(path) = &runtime.snapshot_path {
         let _lock = windows::lock()?;
         if path.exists() { restore_snapshot_locked(path)?; }
-        else if !watcher_recovered { return Err("Snapshot исчез; восстановление невозможно, проверьте proxy Windows вручную".into()); }
+        else if !watcher_recovered { return Err("Snapshot исчез; восстановление невозможно, проверьте системный proxy вручную".into()); }
     }
     runtime.snapshot_path = None;
     // Disarm only after restoration; waiting outside the cross-process lock prevents deadlocks.
@@ -1004,16 +1107,19 @@ fn stop_runtime(runtime: &mut ProxyRuntime) -> Result<(), String> {
     runtime.generation = runtime.generation.wrapping_add(1);
     watchdog_result
 }
+#[cfg(not(target_os = "macos"))]
 fn points_to_local_proxy() -> Result<bool, String> {
     let server = windows::get("ProxyServer")?;
     let enabled = windows::get("ProxyEnable")? == dword(1) || windows::flags()? & 2 != 0;
     Ok(enabled && server == text(LOCAL_PROXY))
 }
+#[cfg(target_os = "macos")]
+fn points_to_local_proxy() -> Result<bool, String> { macos_proxy::points_to_local_proxy() }
 fn stop_checked(runtime: &mut ProxyRuntime, path: &Path) -> Result<(), String> {
     if runtime.snapshot_path.is_some() { return stop_runtime(runtime); }
     if path.exists() { restore_snapshot(path)?; }
     if runtime.child.is_none() && points_to_local_proxy()? {
-        return Err("Windows указывает на 127.0.0.1:2080, но нет работающего Xray и snapshot. Безопасное автоматическое восстановление невозможно; проверьте proxy Windows вручную".into());
+        return Err("Системный proxy указывает на 127.0.0.1:2080, но нет работающего Xray и snapshot. Безопасное автоматическое восстановление невозможно; проверьте настройки proxy вручную".into());
     }
     stop_runtime(runtime)
 }
