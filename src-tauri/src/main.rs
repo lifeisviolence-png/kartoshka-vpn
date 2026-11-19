@@ -1362,6 +1362,7 @@ fn redact_diagnostics(input: &str) -> String {
         (r#"(?i)\b(?:vless|vmess|trojan|ss|hysteria2)://[^\s"'<>]+"#, "***"),
         (r#"(?i)\b(pbk|sid|password|passwd|uuid|token|secret|publickey|shortid)(\s*["']?\s*[:=]\s*["']?)([^\s"',;&}]+)"#, "$1$2***"),
         (r#"(?i)("(?:server|address|host)"\s*:\s*")[^"]+"#, "${1}***"),
+        (r#"(?i)\b(host|server|address|sni)=([^\s,;&}]+)"#, "$1=***"),
         (r#"(?i)https?://[^\s"'<>]+"#, "https://***"),
         (r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}:\d{1,5}\b", "***"),
     ];
@@ -1694,12 +1695,13 @@ mod proxy_policy_tests {
     fn diagnostics_hide_secrets_and_remote_hosts() {
         let raw = r#"vless://11111111-2222-3333-4444-555555555555@nl.example.com:443?type=tcp&security=reality&pbk=abcdef012345&sid=deadbeef#NL
 subscription https://sub.example.net/secret-token
-ProxyServer=127.0.0.1:2080; remote=203.0.113.10:443"#;
+ProxyServer=127.0.0.1:2080; remote=203.0.113.10:443; host=cdn.example.org; sni=cdn.example.org"#;
         let redacted = redact_diagnostics(raw);
-        for secret in ["11111111-2222", "nl.example.com", "abcdef012345", "deadbeef", "sub.example.net", "secret-token", "203.0.113.10"] {
+        for secret in ["11111111-2222", "nl.example.com", "abcdef012345", "deadbeef", "sub.example.net", "secret-token", "203.0.113.10", "cdn.example.org"] {
             assert!(!redacted.contains(secret), "not masked: {secret} in {redacted}");
         }
         assert!(redacted.contains("127.0.0.1:2080"), "local proxy must stay readable");
+        assert!(redacted.contains("ProxyServer=127.0.0.1:2080"), "ProxyServer key must not be treated as a remote host");
     }
 }
 #[cfg(test)]
