@@ -78,6 +78,7 @@ jobs:
           # No Apple Developer certificate is configured for this repository:
           # this is an explicit ad-hoc signature, not Developer ID signing and
           # not notarization. Gatekeeper will still show a warning on first run.
+          xattr -cr "$app" || true
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           version=$(node -p "require('./package.json').version")

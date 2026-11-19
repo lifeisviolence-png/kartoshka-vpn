@@ -698,17 +698,46 @@ fn backup_for(target: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+fn admin_restore_backup(target: &Path, backup: &Path) -> Result<(), String> {
+    let script = std::env::temp_dir().join(format!("kartoshka-restore-{}.sh", std::process::id()));
+    let body = format!(
+        "#!/bin/sh\nset -e\nrm -rf -- {}\nmv {} {}\n",
+        shell_quote(&target.to_string_lossy()),
+        shell_quote(&backup.to_string_lossy()),
+        shell_quote(&target.to_string_lossy())
+    );
+    fs::write(&script, body).map_err(|error| format!("Не удалось создать скрипт восстановления: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&script, fs::Permissions::from_mode(0o700));
+    }
+    let apple = format!(
+        "do shell script \"/bin/sh {}\" with administrator privileges",
+        shell_quote(&script.to_string_lossy())
+    );
+    let status = Command::new("/usr/bin/osascript")
+        .args(["-e", &apple])
+        .status()
+        .map_err(|error| format!("Не удалось запросить права для восстановления: {error}"))?;
+    let _ = fs::remove_file(&script);
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Не удалось восстановить предыдущую версию автоматически".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn restore_backup(target: &Path, backup: &Path) -> Result<(), String> {
     if !backup.is_dir() {
         return Err(format!("Резервная копия приложения не найдена: {}", backup.display()));
     }
     let _ = fs::remove_dir_all(target);
-    fs::rename(backup, target).map_err(|error| {
-        format!(
-            "Не удалось вернуть старую версию: {error}. Резервная копия: {}",
-            backup.display()
-        )
-    })
+    if fs::rename(backup, target).is_ok() {
+        return Ok(());
+    }
+    admin_restore_backup(target, backup)
 }
 
 #[cfg(target_os = "macos")]
