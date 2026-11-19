@@ -25,6 +25,7 @@ const TRANSACTION_LOCK: &str = "/tmp/ru.kartoshka.vpn.transaction.lock";
 const STATE_PREFIX: &[u8] = b"KPV3-MAC\0";
 const LOCAL_HOST: &str = "127.0.0.1";
 const LOCAL_PORT: u16 = 2080;
+const LOCAL_SOCKS_PORT: u16 = 2081;
 // `networksetup` takes a space-separated bypass list. `<local>` is a WinINet
 // token and must never be passed to macOS. Loopback literals are enough for the
 // local Xray listener; `localhost` also covers IPv6 resolution.
@@ -52,6 +53,7 @@ pub struct ServiceState {
     pub name: String,
     pub web: ProxyConfig,
     pub secure_web: ProxyConfig,
+    pub socks: ProxyConfig,
     pub bypass: Vec<String>,
     pub auto_proxy: AutoProxyConfig,
     pub auto_discovery: bool,
@@ -72,7 +74,11 @@ impl Snapshot {
             if service.name.trim().is_empty() || !names.insert(service.name.as_str()) {
                 return Err("В снимке macOS повторяется или пустое имя сетевого сервиса".into());
             }
-            for (label, proxy) in [("HTTP", &service.web), ("HTTPS", &service.secure_web)] {
+            for (label, proxy) in [
+                ("HTTP", &service.web),
+                ("HTTPS", &service.secure_web),
+                ("SOCKS", &service.socks),
+            ] {
                 if proxy.enabled && (proxy.server.trim().is_empty() || proxy.port == 0) {
                     return Err(format!(
                         "Некорректный {label}-proxy в сервисе «{}»: включён без адреса",
@@ -259,6 +265,56 @@ fn run(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn permission_error(error: &str) -> bool {
+    let text = error.to_ascii_lowercase();
+    text.contains("must be root")
+        || text.contains("administrator")
+        || text.contains("not authorized")
+        || text.contains("permission denied")
+        || text.contains("authorization")
+}
+
+fn run_admin_script(body: &str) -> Result<(), String> {
+    let script = std::env::temp_dir().join(format!(
+        "kartoshka-network-{}.sh",
+        std::process::id()
+    ));
+    fs::write(&script, body).map_err(|error| format!("Не удалось создать admin-скрипт: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&script, fs::Permissions::from_mode(0o700));
+    }
+    let apple = format!(
+        "do shell script \"/bin/sh {}\" with administrator privileges",
+        shell_quote(&script.to_string_lossy())
+    );
+    let status = Command::new("/usr/bin/osascript")
+        .args(["-e", &apple])
+        .status()
+        .map_err(|error| format!("Не удалось запросить права администратора: {error}"))?;
+    let _ = fs::remove_file(&script);
+    if status.success() {
+        Ok(())
+    } else {
+        Err("macOS не разрешила изменить системный proxy. Нажмите «Разрешить» в запросе пароля администратора."
+            .into())
+    }
+}
+
+fn push_command(lines: &mut Vec<String>, args: &[&str]) {
+    let mut line = shell_quote(NETWORKSETUP);
+    for arg in args {
+        line.push(' ');
+        line.push_str(&shell_quote(arg));
+    }
+    lines.push(line);
+}
+
 fn normalized_server(server: &str) -> String {
     let server = server.trim();
     if server.eq_ignore_ascii_case("(null)") || server == "0.0.0.0" {
@@ -306,6 +362,10 @@ fn get_proxy(service: &str, secure: bool) -> Result<ProxyConfig, String> {
         "-getwebproxy"
     };
     run(&[option, service]).map(|out| parse_proxy(&out))
+}
+
+fn get_socks_proxy(service: &str) -> Result<ProxyConfig, String> {
+    run(&["-getsocksfirewallproxy", service]).map(|out| parse_proxy(&out))
 }
 
 fn get_bypass(service: &str) -> Result<Vec<String>, String> {
@@ -367,6 +427,7 @@ fn capture_service(name: &str) -> Result<ServiceState, String> {
         name: name.to_string(),
         web: get_proxy(name, false)?,
         secure_web: get_proxy(name, true)?,
+        socks: get_socks_proxy(name)?,
         bypass: get_bypass(name)?,
         auto_proxy: get_auto_proxy(name)?,
         auto_discovery: get_auto_discovery(name)?,
@@ -392,11 +453,21 @@ fn local_proxy() -> ProxyConfig {
     }
 }
 
+fn local_socks_proxy() -> ProxyConfig {
+    ProxyConfig {
+        enabled: true,
+        server: LOCAL_HOST.into(),
+        port: LOCAL_SOCKS_PORT,
+        authenticated: false,
+    }
+}
+
 fn applied_service(before: &ServiceState) -> ServiceState {
     ServiceState {
         name: before.name.clone(),
         web: local_proxy(),
         secure_web: local_proxy(),
+        socks: local_socks_proxy(),
         bypass: normalize_domains(
             LOCAL_BYPASS_DOMAINS.iter().map(|s| s.to_string()).collect(),
         ),
@@ -418,7 +489,11 @@ fn applied_snapshot(before: &Snapshot) -> Snapshot {
 
 pub fn require_no_foreign_proxy(snapshot: &Snapshot) -> Result<(), String> {
     for service in &snapshot.services {
-        for (label, proxy) in [("HTTP", &service.web), ("HTTPS", &service.secure_web)] {
+        for (label, proxy) in [
+            ("HTTP", &service.web),
+            ("HTTPS", &service.secure_web),
+            ("SOCKS", &service.socks),
+        ] {
             if proxy.authenticated {
                 return Err(format!(
                     "В macOS для сервиса «{}» настроен {label}-proxy с авторизацией. Подключение заблокировано, чтобы не потерять учётные данные. Отключите его в «Системных настройках → Сеть → Прокси» и повторите.",
@@ -478,6 +553,20 @@ pub fn apply(
     watchdog: &mut Child,
 ) -> Result<(), String> {
     before.validate()?;
+    match apply_standard(before, fail_after, watchdog) {
+        Err(error) if permission_error(&error) => {
+            apply_admin(before, watchdog)
+        }
+        result => result,
+    }
+}
+
+fn apply_standard(
+    before: &Snapshot,
+    fail_after: Option<usize>,
+    watchdog: &mut Child,
+) -> Result<(), String> {
+    before.validate()?;
     require_no_foreign_proxy(before)?;
     let mut expected = before.clone();
     let mut writes = 0usize;
@@ -501,6 +590,19 @@ pub fn apply(
             &["-setsecurewebproxy", &name, LOCAL_HOST, "2080"],
         )?;
         expected.services[index].secure_web = local_proxy();
+        write_counted(
+            &expected,
+            watchdog,
+            &mut writes,
+            fail_after,
+            &[
+                "-setsocksfirewallproxy",
+                &name,
+                LOCAL_HOST,
+                &LOCAL_SOCKS_PORT.to_string(),
+            ],
+        )?;
+        expected.services[index].socks = local_socks_proxy();
     }
 
     // 2. Set the bypass list.
@@ -552,6 +654,14 @@ pub fn apply(
             &["-setsecurewebproxystate", &name, "on"],
         )?;
         expected.services[index].secure_web = local_proxy();
+        write_counted(
+            &expected,
+            watchdog,
+            &mut writes,
+            fail_after,
+            &["-setsocksfirewallproxystate", &name, "on"],
+        )?;
+        expected.services[index].socks = local_socks_proxy();
     }
 
     let applied = applied_snapshot(before);
@@ -562,6 +672,37 @@ pub fn apply(
     check(watchdog)
 }
 
+fn apply_admin(before: &Snapshot, watchdog: &mut Child) -> Result<(), String> {
+    before.validate()?;
+    let mut lines = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
+    for service in &before.services {
+        let name = service.name.as_str();
+        push_command(&mut lines, &["-setwebproxy", name, LOCAL_HOST, "2080"]);
+        push_command(&mut lines, &["-setsecurewebproxy", name, LOCAL_HOST, "2080"]);
+        push_command(&mut lines, &[
+            "-setsocksfirewallproxy",
+            name,
+            LOCAL_HOST,
+            &LOCAL_SOCKS_PORT.to_string(),
+        ]);
+        let mut bypass = vec!["-setproxybypassdomains", name];
+        bypass.extend(LOCAL_BYPASS_DOMAINS);
+        push_command(&mut lines, &bypass);
+        push_command(&mut lines, &["-setautoproxystate", name, "off"]);
+        push_command(&mut lines, &["-setproxyautodiscovery", name, "off"]);
+        push_command(&mut lines, &["-setwebproxystate", name, "on"]);
+        push_command(&mut lines, &["-setsecurewebproxystate", name, "on"]);
+        push_command(&mut lines, &["-setsocksfirewallproxystate", name, "on"]);
+    }
+    run_admin_script(&(lines.join("\n") + "\n"))?;
+    check(watchdog)?;
+    let current = capture()?;
+    if current != applied_snapshot(before) {
+        return Err("Системный proxy macOS не включился полностью после запроса администратора".into());
+    }
+    Ok(())
+}
+
 fn compatible(current: &ServiceState, before: &ServiceState) -> bool {
     let applied = applied_service(before);
     let proxy_ok = |now: &ProxyConfig, was: &ProxyConfig, target: &ProxyConfig| {
@@ -570,6 +711,7 @@ fn compatible(current: &ServiceState, before: &ServiceState) -> bool {
     current.name == before.name
         && proxy_ok(&current.web, &before.web, &applied.web)
         && proxy_ok(&current.secure_web, &before.secure_web, &applied.secure_web)
+        && proxy_ok(&current.socks, &before.socks, &applied.socks)
         && (current.bypass == before.bypass || current.bypass == applied.bypass)
         && (current.auto_proxy == before.auto_proxy
             || current.auto_proxy == applied.auto_proxy)
@@ -583,6 +725,7 @@ fn restore_service(service: &ServiceState) -> Result<(), String> {
     // at a stale local listener.
     let _ = run(&["-setwebproxystate", name, "off"]);
     let _ = run(&["-setsecurewebproxystate", name, "off"]);
+    let _ = run(&["-setsocksfirewallproxystate", name, "off"]);
 
     if !service.auto_proxy.url.is_empty() {
         run(&["-setautoproxyurl", name, &service.auto_proxy.url])?;
@@ -636,6 +779,19 @@ fn restore_service(service: &ServiceState) -> Result<(), String> {
     if !service.secure_web.enabled {
         run(&["-setsecurewebproxystate", name, "off"])?;
     }
+    if service.socks.server.is_empty() {
+        let _ = run(&["-setsocksfirewallproxy", name, "0.0.0.0", "0"]);
+    } else {
+        run(&[
+            "-setsocksfirewallproxy",
+            name,
+            &service.socks.server,
+            &service.socks.port.to_string(),
+        ])?;
+    }
+    if !service.socks.enabled {
+        run(&["-setsocksfirewallproxystate", name, "off"])?;
+    }
     run(&[
         "-setwebproxystate",
         name,
@@ -646,10 +802,23 @@ fn restore_service(service: &ServiceState) -> Result<(), String> {
         name,
         if service.secure_web.enabled { "on" } else { "off" },
     ])?;
+    run(&[
+        "-setsocksfirewallproxystate",
+        name,
+        if service.socks.enabled { "on" } else { "off" },
+    ])?;
     Ok(())
 }
 
 pub fn restore(before: &Snapshot) -> Result<(), String> {
+    before.validate()?;
+    match restore_standard(before) {
+        Err(error) if permission_error(&error) => restore_admin(before),
+        result => result,
+    }
+}
+
+fn restore_standard(before: &Snapshot) -> Result<(), String> {
     before.validate()?;
     let current = capture()?;
     if current.services.len() != before.services.len()
@@ -671,6 +840,70 @@ pub fn restore(before: &Snapshot) -> Result<(), String> {
     Ok(())
 }
 
+fn restore_admin(before: &Snapshot) -> Result<(), String> {
+    let mut lines = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
+    for service in &before.services {
+        let name = service.name.as_str();
+        push_command(&mut lines, &["-setwebproxystate", name, "off"]);
+        push_command(&mut lines, &["-setsecurewebproxystate", name, "off"]);
+        push_command(&mut lines, &["-setsocksfirewallproxystate", name, "off"]);
+        if service.auto_proxy.url.is_empty() {
+            push_command(&mut lines, &["-setautoproxystate", name, "off"]);
+        } else {
+            push_command(&mut lines, &["-setautoproxyurl", name, &service.auto_proxy.url]);
+            push_command(&mut lines, &[
+                "-setautoproxystate",
+                name,
+                if service.auto_proxy.enabled { "on" } else { "off" },
+            ]);
+        }
+        push_command(&mut lines, &[
+            "-setproxyautodiscovery",
+            name,
+            if service.auto_discovery { "on" } else { "off" },
+        ]);
+        if service.bypass.is_empty() {
+            push_command(&mut lines, &["-setproxybypassdomains", name, "Empty"]);
+        } else {
+            let mut args = vec!["-setproxybypassdomains", name];
+            args.extend(service.bypass.iter().map(String::as_str));
+            push_command(&mut lines, &args);
+        }
+        for (kind, proxy) in [
+            ("-setwebproxy", &service.web),
+            ("-setsecurewebproxy", &service.secure_web),
+            ("-setsocksfirewallproxy", &service.socks),
+        ] {
+            if proxy.server.is_empty() {
+                push_command(&mut lines, &[kind, name, "0.0.0.0", "0"]);
+            } else {
+                push_command(&mut lines, &[kind, name, &proxy.server, &proxy.port.to_string()]);
+            }
+        }
+        push_command(&mut lines, &[
+            "-setwebproxystate",
+            name,
+            if service.web.enabled { "on" } else { "off" },
+        ]);
+        push_command(&mut lines, &[
+            "-setsecurewebproxystate",
+            name,
+            if service.secure_web.enabled { "on" } else { "off" },
+        ]);
+        push_command(&mut lines, &[
+            "-setsocksfirewallproxystate",
+            name,
+            if service.socks.enabled { "on" } else { "off" },
+        ]);
+    }
+    run_admin_script(&(lines.join("\n") + "\n"))?;
+    let final_state = capture()?;
+    if final_state != *before {
+        return Err("Не удалось вернуть точные настройки proxy macOS после запроса администратора".into());
+    }
+    Ok(())
+}
+
 pub fn dump(snapshot: &Snapshot) -> String {
     serde_json::to_string_pretty(snapshot).unwrap_or_else(|e| format!("<ошибка снимка proxy: {e}>"))
 }
@@ -684,9 +917,13 @@ pub fn dump_current() -> String {
 pub fn points_to_local_proxy() -> Result<bool, String> {
     let snapshot = capture()?;
     Ok(snapshot.services.iter().any(|service| {
-        [&service.web, &service.secure_web]
+        [&service.web, &service.secure_web, &service.socks]
             .iter()
-            .any(|proxy| proxy.enabled && proxy.server == LOCAL_HOST && proxy.port == LOCAL_PORT)
+            .any(|proxy| {
+                proxy.enabled
+                    && proxy.server == LOCAL_HOST
+                    && (proxy.port == LOCAL_PORT || proxy.port == LOCAL_SOCKS_PORT)
+            })
     }))
 }
 
@@ -694,7 +931,7 @@ pub fn flags() -> Result<u32, String> {
     let snapshot = capture()?;
     let mut value = 0;
     if snapshot.services.iter().any(|service| {
-        service.web.enabled || service.secure_web.enabled
+        service.web.enabled || service.secure_web.enabled || service.socks.enabled
     }) {
         value |= 2;
     }
@@ -1071,6 +1308,12 @@ mod tests {
                 port: 0,
                 authenticated: false,
             },
+            socks: ProxyConfig {
+                enabled: false,
+                server: "socks.corp.example".into(),
+                port: 1080,
+                authenticated: false,
+            },
             bypass: vec!["*.corp.example".into()],
             auto_proxy: AutoProxyConfig {
                 enabled: true,
@@ -1108,6 +1351,7 @@ mod tests {
         let actual = &applied.services[0];
         assert_eq!(actual.web, local_proxy());
         assert_eq!(actual.secure_web, local_proxy());
+        assert_eq!(actual.socks, local_socks_proxy());
         assert_eq!(actual.bypass, vec!["127.0.0.1", "localhost"]);
         assert!(!actual.auto_proxy.enabled);
         assert_eq!(actual.auto_proxy.url, before.services[0].auto_proxy.url);

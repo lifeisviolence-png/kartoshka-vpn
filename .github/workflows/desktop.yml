@@ -250,6 +250,8 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout signing scripts
+        uses: actions/checkout@v4
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -266,8 +268,14 @@ jobs:
           find release-assets -mindepth 2 -name '*-setup.exe' -delete
           ( cd release-assets && sha256sum "KartoshkaVPN_${version}_x64-setup.exe" > SHA256SUMS.txt && cat SHA256SUMS.txt )
           ls -l release-assets
-      - name: Publish prerelease assets
+      - name: Sign checksum
+        env:
+          KARTOSHKA_UPDATE_SIGNING_KEY: ${{ secrets.KARTOSHKA_UPDATE_SIGNING_KEY }}
+        shell: bash
+        run: bash scripts/sign-checksums.sh release-assets/SHA256SUMS.txt
+      - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: true
+          prerelease: false
+          make_latest: true
           files: release-assets/**/*

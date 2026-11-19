@@ -1,3 +1,24 @@
+@font-face {
+  font-family: Inter;
+  src: url("/fonts/Inter-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: Inter;
+  src: url("/fonts/Inter-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: Inter;
+  src: url("/fonts/Inter-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
 /* KartoshkaVPN 0.9 — dark, calm, dense.
    Palette and spacing live in variables so the whole interface can be tuned in
    one place. No blur, no gradients, no decorative uppercase. */
@@ -23,12 +44,13 @@
   --radius-sm: 8px;
   --row: 44px;
   --sidebar: 208px;
-  --font: Inter, "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; }
+html { background: var(--bg); accent-color: var(--accent); }
 body {
   margin: 0;
   background: var(--bg);
@@ -37,7 +59,9 @@ body {
   font-size: 13.5px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
 }
+::selection { background: rgba(124, 92, 255, 0.35); color: var(--text); }
 button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -88,6 +112,21 @@ h3 { font-size: 14px; font-weight: 600; }
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--bg);
   position: sticky; top: 0; z-index: 5;
+}
+html[data-os="macos"] .topbar {
+  min-height: 56px;
+  padding-top: 18px;
+  -webkit-app-region: drag;
+}
+html[data-os="macos"] .topbar button,
+html[data-os="macos"] .topbar a,
+html[data-os="macos"] .topbar input,
+html[data-os="macos"] .topbar select {
+  -webkit-app-region: no-drag;
+}
+html[data-os="macos"] .sidebar { padding-top: 38px; }
+@media (max-width: 899px) {
+  html[data-os="macos"] .sidebar { padding-top: 16px; }
 }
 .topbar-title { display: flex; flex-direction: column; gap: 1px; }
 .topbar-sub { color: var(--muted); font-size: 11.5px; }
@@ -324,19 +363,52 @@ select:disabled { opacity: 0.5; }
 .detail-metrics div { display: flex; flex-direction: column; gap: 1px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
 .detail-metrics span { color: var(--muted); font-size: 10.5px; }
 .detail-metrics strong { font-size: 12.5px; font-variant-numeric: tabular-nums; }
-.detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.detail-actions .button { justify-content: flex-start; }
+.detail-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+.detail-actions .button {
+  min-width: 0;
+  height: auto;
+  min-height: 32px;
+  padding: 6px 8px;
+  justify-content: flex-start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+@media (max-width: 430px) {
+  .detail-actions { grid-template-columns: 1fr; }
+}
 
 /* Pages ------------------------------------------------------------------- */
 .page { padding: 18px 22px 0; display: flex; flex-direction: column; gap: 12px; }
 .page.narrow { max-width: 760px; }
-.setting { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid var(--border); }
+.setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
 .setting:first-of-type { border-top: 0; padding-top: 2px; }
-.setting div { display: flex; flex-direction: column; gap: 2px; }
+.setting > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.setting > :last-child { justify-self: end; align-self: start; }
 .setting strong { font-size: 12.5px; font-weight: 600; }
 .setting small { color: var(--muted); font-size: 11.5px; max-width: 460px; }
 .setting select { min-width: 150px; }
 .setting.muted strong { color: var(--muted-strong); }
+.dns-check-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 4px 0 10px; border-top: 0; }
+.dns-check-row .button { flex: none; }
+.dns-result { color: var(--muted-strong); font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 899px) {
+  .setting { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .setting > :last-child { justify-self: start; }
+  .setting select { width: 100%; }
+}
 .switch { position: relative; display: inline-flex; width: 34px; height: 20px; flex: none; }
 .switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
 .switch span { width: 100%; height: 100%; border-radius: 999px; background: var(--border-strong); transition: background 120ms ease; }

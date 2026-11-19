@@ -10,6 +10,8 @@ import { scrubLegacyStorage, legacyKeysPresent } from './secure-store.js';
 import { migrateState, snapshot, subscriptionIdFor, subscriptionNameFor, mergeSubscriptionNodes, removeSubscription, restoreSubscription, nodeEndpoint, mergeKey } from './state-model.js';
 
 const capabilities = desktopBridge.getCapabilities();
+const hostIsMac = /Mac/i.test(globalThis.navigator?.platform || globalThis.navigator?.userAgent || '');
+if (typeof document !== 'undefined' && document.documentElement) document.documentElement.dataset.os = hostIsMac ? 'macos' : 'windows';
 const routeModeIds = ['all', 'auto', 'split'];
 const dnsModeIds = ['system', 'builtin'];
 const directScheme = /^(vless|vmess|trojan|ss|shadowsocks|hysteria2|hy2):\/\//i;
@@ -197,6 +199,11 @@ function errorText(error) {
   if (getLanguage() === 'en' && /[\u0400-\u04FF]/.test(text)) return t('err.coreRussian', { text });
   return text;
 }
+function coreErrorText(error) {
+  const text = String(errorText(error));
+  const match = text.match(/^(CORE_LAUNCH_[A-Z_]+):/);
+  return match ? t(`coreError.${match[1]}`) : text;
+}
 function messageText(message) {
   if (!message) return '';
   if (message.key === 'raw') return message.params?.text || '';
@@ -282,8 +289,19 @@ function flagMarkup(code, className = 'flag') {
 }
 function displayName(node) {
   // Providers usually prefix the name with a flag emoji; the row renders a real
-  // flag next to it, so the duplicate is removed from the visible label only.
-  return String(node?.customName || node?.name || t('servers.serverFallback')).replace(/^[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, '').trim();
+  // flag next to it, so flags/ISO prefixes are removed from the visible label
+  // only. The stored name and the search haystack keep the original text.
+  const raw = String(node?.customName || node?.name || t('servers.serverFallback')).trim();
+  let code = countryByCode(node?.countryCode) ? node.countryCode : '';
+  if (!code) {
+    const detected = detectCountry(raw, node?.city || '');
+    if (detected.code) code = detected.code;
+  }
+  let name = raw;
+  if (code) name = name.replace(new RegExp(`^${String(code).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i'), '');
+  name = name.replace(/^(?:[\u{1F1E6}-\u{1F1FF}]{2}\s*)+/u, '');
+  name = name.replace(/^[\s|·:—–-]+/, '').trim();
+  return name || raw;
 }
 function nodeFlag(node, className = 'flag') { return flagMarkup(countryByCode(node?.countryCode) ? node.countryCode : '', className); }
 function protocolBadge(node) {
@@ -345,6 +363,9 @@ function navItem(id, iconName, label) {
 function renderNotice() {
   if (!state.notice) return '';
   const details = state.notice.details?.length ? `<ul>${state.notice.details.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : '';
+  // Never render a dismiss-only bar: an empty notice looked like a stray close
+  // button above the selected-server card on macOS.
+  if (!String(state.notice.text || '').trim() && !details) return '';
   const action = state.notice.action === 'reconnect'
     ? `<button class="button small" data-action="reconnect">${escapeHtml(t('action.reconnect'))}</button>`
     : state.notice.action === 'reset-storage'
@@ -649,6 +670,7 @@ function clientUpdateMarkup() {
   if (status === 'checking') statusText = t('settings.checkingClientUpdate');
   else if (status === 'downloading') statusText = t('settings.clientUpdateDownloading');
   else if (status === 'installing') statusText = t('settings.clientUpdateInstalling');
+  else if (status === 'disconnecting') statusText = t('settings.clientUpdateDisconnecting');
   else if (status === 'error') statusText = t('settings.clientUpdateError', { error: update.error || '' });
   else if (info?.available) statusText = t('settings.clientUpdateAvailable', { version: info.latestVersion });
   else if (info) statusText = t('settings.clientUpdateCurrent');
@@ -658,19 +680,22 @@ function clientUpdateMarkup() {
   const reason = info?.available && info.reason
     ? `<small class="warn">${escapeHtml(info.reason)}</small>`
     : '';
-  const disabled = status === 'checking' || status === 'downloading' || status === 'installing';
-  const installDisabled = disabled || !info?.canInstall || busy() || state.connection !== 'idle' || state.cleanupNeeded;
+  const signature = info?.available
+    ? `<small class="${info.signatureVerified ? 'muted' : 'warn'}">${escapeHtml(t(info.signatureVerified ? 'settings.clientUpdateSignature' : 'settings.clientUpdateSignatureMissing'))}</small>`
+    : '';
+  const disabled = status === 'checking' || status === 'downloading' || status === 'installing' || status === 'disconnecting';
+  const installDisabled = disabled || !info?.canInstall || busy() || state.cleanupNeeded;
+  const installLabel = state.connection === 'connected' ? t('settings.clientUpdateDisconnectInstall') : t('settings.clientUpdateDownload');
   const install = info?.available
-    ? `<button class="button small" id="install-client-update" ${installDisabled ? 'disabled' : ''}>${icon('download', 14)}${escapeHtml(t('settings.clientUpdateDownload'))}</button>`
+    ? `<button class="button small" id="install-client-update" ${installDisabled ? 'disabled' : ''}>${icon('download', 14)}${escapeHtml(installLabel)}</button>`
     : '';
   const release = info?.releaseUrl
     ? `<button class="button small" data-action="open-client-release">${escapeHtml(t('settings.clientUpdateOpen'))}</button>`
     : '';
-  const isMac = /Mac/i.test(globalThis.navigator?.platform || globalThis.navigator?.userAgent || '');
-  const admin = isMac ? `<div class="setting"><small>${escapeHtml(t('settings.clientUpdateAdmin'))}</small></div>` : '';
+  const admin = hostIsMac ? `<div class="setting"><small>${escapeHtml(t('settings.clientUpdateAdmin'))}</small></div>` : '';
   return `<div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.clientUpdate'))}</span></div>
     <div class="setting"><div><strong>${escapeHtml(t('settings.clientVersion'))}</strong></div><span class="mono">${escapeHtml(VERSION)}</span></div>
-    <div class="setting"><div><strong>${escapeHtml(statusText)}</strong><small>${escapeHtml(t('settings.clientUpdateHint'))}</small>${reason}${notes}</div><div class="row-actions"><button class="button small" id="check-client-update" ${disabled ? 'disabled' : ''}>${icon('refresh', 14)}${escapeHtml(t('settings.checkClientUpdate'))}</button>${install}${release}</div></div>
+    <div class="setting"><div><strong>${escapeHtml(statusText)}</strong><small>${escapeHtml(t('settings.clientUpdateHint'))}</small>${signature}${reason}${notes}</div><div class="row-actions"><button class="button small" id="check-client-update" ${disabled ? 'disabled' : ''}>${icon('refresh', 14)}${escapeHtml(t('settings.checkClientUpdate'))}</button>${install}${release}</div></div>
     ${admin}
   </div>`;
 }
@@ -680,6 +705,9 @@ function settingsMarkup() {
   const source = state.routing?.profile ? t('settings.routeSourceSubscription') : t('settings.routeSourceBuiltin');
   const rejected = state.routing?.unsupported?.length || 0;
   const routeNote = `${escapeHtml(t('settings.routeSource', { source }))}${rejected ? `<br/><span class="warn-text">${escapeHtml(t('settings.routeUnsupported', { count: rejected }))}</span>` : ''}${state.routing?.dns ? `<br/><span class="muted">${escapeHtml(t('settings.routeDnsIgnored'))}</span>` : ''}`;
+  const dnsResult = state.dnsCheck
+    ? `${escapeHtml(t(state.dnsCheck.ok ? 'settings.dnsCheckOk' : 'settings.dnsCheckFail', { server: state.dnsCheck.server || '', ip: state.dnsCheck.ip || '' }))}${state.dnsCheck.ok ? ` · ${escapeHtml(t('settings.dnsCheckPath', { path: t(`settings.dnsVia.${state.dnsCheck.via || 'bootstrap-ip'}`, { ip: state.dnsCheck.ip || '' }) }))}` : ''}`
+    : '';
   return `<section class="page narrow">
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.general'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.language'))}</strong><small>${escapeHtml(t('settings.languageHint'))}</small></div><select id="language" aria-label="${escapeHtml(t('settings.language'))}"><option value="ru" ${state.language === 'ru' ? 'selected' : ''}>${escapeHtml(t('settings.languageRu'))}</option><option value="en" ${state.language === 'en' ? 'selected' : ''}>${escapeHtml(t('settings.languageEn'))}</option></select></div>
@@ -702,7 +730,8 @@ function settingsMarkup() {
       <div class="setting"><div><strong>${escapeHtml(t('settings.autoconnect'))}</strong><small>${escapeHtml(t('settings.autoconnectHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-autoconnect" ${state.settings?.autoconnect ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.closeToTray'))}</strong><small>${escapeHtml(t('settings.closeToTrayHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-close-to-tray" ${state.settings?.closeToTray ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.autoUpdate'))}</strong><small>${escapeHtml(t('settings.autoUpdateHint'))}</small></div><select id="auto-update-hours" aria-label="${escapeHtml(t('settings.autoUpdate'))}">${[[0, 'off'], [6, '6'], [12, '12'], [24, '24']].map(([value, key]) => `<option value="${value}" ${Number(state.settings?.autoUpdateHours ?? 12) === value ? 'selected' : ''}>${escapeHtml(t(`settings.autoUpdate.${key}`))}</option>`).join('')}</select></div>
-      <div class="setting"><div><strong>${escapeHtml(t('home.dnsProtection'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.desc`))}</small><small class="muted">${escapeHtml(t('home.dnsProtectionInfo'))}</small>${state.dnsCheck ? `<small class="${state.dnsCheck.ok ? '' : 'warn'}">${escapeHtml(t(state.dnsCheck.ok ? 'settings.dnsCheckOk' : 'settings.dnsCheckFail', { server: state.dnsCheck.server || '', ip: state.dnsCheck.ip || '' }))}</small>${state.dnsCheck.ok ? `<small class="muted">${escapeHtml(t('settings.dnsCheckPath', { path: t(`settings.dnsVia.${state.dnsCheck.via || 'bootstrap-ip'}`, { ip: state.dnsCheck.ip || '' }) }))}</small>` : ''}` : ''}</div><div class="row-actions"><button class="button small" id="dns-check" ${state.dnsCheck?.running ? 'disabled' : ''}>${escapeHtml(t('settings.checkDns'))}</button><label class="switch"><input type="checkbox" id="settings-dns-protection" data-toggle="dns-protection" aria-label="${escapeHtml(t('home.dnsProtection'))}" ${dnsMode === 'builtin' ? 'checked' : ''}/><span></span></label></div></div>
+      <div class="setting"><div><strong>${escapeHtml(t('home.dnsProtection'))}</strong><small>${escapeHtml(t(`settings.dnsMode.${dnsMode}.desc`))}</small><small class="muted">${escapeHtml(t('home.dnsProtectionInfo'))}</small></div><label class="switch"><input type="checkbox" id="settings-dns-protection" data-toggle="dns-protection" aria-label="${escapeHtml(t('home.dnsProtection'))}" ${dnsMode === 'builtin' ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting dns-check-row"><button class="button small" id="dns-check" ${state.dnsCheck?.running ? 'disabled' : ''}>${escapeHtml(t('settings.checkDns'))}</button><span class="dns-result" role="status">${dnsResult}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.failover'))}</strong></div><select id="failover-mode" aria-label="${escapeHtml(t('settings.failover'))}">${['country', 'any', 'never'].map((id) => `<option value="${id}" ${id === (state.settings?.failover || 'country') ? 'selected' : ''}>${escapeHtml(t(`settings.failoverMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
@@ -1345,10 +1374,24 @@ async function checkClientUpdate() {
 async function installClientUpdate() {
   const info = state.clientUpdate?.info;
   if (!info?.available || !info.canInstall) return;
-  if (state.connection !== 'idle' || busy() || state.cleanupNeeded) {
+  if (busy() || state.cleanupNeeded) {
     state.notice = { type: 'error', text: t('settings.clientUpdateBlocked') };
     render();
     return;
+  }
+  if (state.connection === 'connected') {
+    state.clientUpdate = { ...state.clientUpdate, status: 'disconnecting', error: '', progress: 0 };
+    setMessage('settings.clientUpdateDisconnecting');
+    render();
+    if (!(await stopCurrent('settings.clientUpdateDisconnecting'))) {
+      state.clientUpdate = {
+        ...state.clientUpdate,
+        status: 'error',
+        error: t('settings.clientUpdateBlocked')
+      };
+      render();
+      return;
+    }
   }
   state.clientUpdate = { ...state.clientUpdate, status: 'downloading', error: '', progress: 0 };
   render();
@@ -1445,7 +1488,7 @@ async function startSelected(node) {
     const pool = poolRaw.length > 1 ? await Promise.all(poolRaw.map(protectNodeAddress)) : poolRaw;
     const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: dnsProtectionOn() ? 'builtin' : 'system', perf: { ...(state.settings?.perf || {}), tcpFastOpen: fastReconnectOn() }, auto: pool.length > 1 ? pool : undefined, xhttpQuery: state.settings?.xhttpQueryParams !== false });
     const result = await desktopBridge.connect({ config, debug: Boolean(state.settings?.debug) });
-    if (result?.ok === false) throw Object.assign(new Error('proxyLaunchFailed'), { code: 'proxyLaunchFailed', params: { error: errorText(result.error) } });
+    if (result?.ok === false) throw Object.assign(new Error('coreLaunch'), { code: 'coreLaunch', params: { error: coreErrorText(result.error) } });
     if (result?.warning) {
       state.proxyWarning = result.warning;
       state.notice = { type: 'error', text: result.warning };
@@ -1466,7 +1509,7 @@ async function startSelected(node) {
     let cleanupError = '';
     try { await stopProxy(); } catch (cleanup) { cleanupError = errorText(cleanup); }
     resetSession(); state.cleanupNeeded = Boolean(cleanupError); state.connection = 'error';
-    const base = errorText(error);
+    const base = coreErrorText(error);
     state.diagnostics = await collectDiagnostics();
     state.message = { key: 'raw', params: { text: cleanupError ? `${base}${t('state.cleanupFailedSuffix', { error: cleanupError })}` : base } };
     if (node?.outbound?.type === 'hysteria2' && /timeout|timed out|handshake/i.test(`${base} ${state.diagnostics}`)) state.notice = { type: 'error', text: t('notice.udpHint') };

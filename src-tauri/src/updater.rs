@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use ed25519_dalek::{Signature, VerifyingKey};
 use std::{
     ffi::OsString,
     fs,
@@ -22,6 +23,13 @@ const RELEASES_URL: &str = "https://api.github.com/repos/lifeisviolence-png/kart
 const USER_AGENT: &str = concat!("KartoshkaVPN/", env!("CARGO_PKG_VERSION"), " (+https://github.com/lifeisviolence-png/kartoshka-vpn)");
 pub const UPDATE_EVENT: &str = "client-update-progress";
 const MAX_DOWNLOAD: usize = 160 * 1024 * 1024;
+const UPDATE_SIGNATURE_SUFFIX: &str = ".sig";
+// Ed25519 public half of the KartoshkaVPN release key. The private half is
+// supplied to CI as a secret and is never stored in this repository.
+const UPDATE_PUBLIC_KEY: [u8; 32] = [
+    0x41, 0xc3, 0x3b, 0xca, 0x92, 0x7c, 0x19, 0x91, 0xba, 0x11, 0x15, 0xb7, 0x00, 0x97, 0x08, 0x42,
+    0x52, 0xb9, 0x0e, 0x6f, 0xda, 0x16, 0x2e, 0x3e, 0xe8, 0x41, 0x54, 0x0f, 0x43, 0x28, 0xf1, 0x03,
+];
 
 #[derive(Debug, Deserialize)]
 struct GhRelease {
@@ -96,6 +104,8 @@ pub struct ClientUpdateInfo {
     pub asset_name: Option<String>,
     pub asset_size: u64,
     pub checksum_name: Option<String>,
+    pub signature_name: Option<String>,
+    pub signature_verified: bool,
     pub can_install: bool,
     pub reason: Option<String>,
     pub platform: String,
@@ -186,6 +196,35 @@ fn checksum_asset<'a>(release: &'a GhRelease, platform: Platform) -> Option<&'a 
         .find(|asset| asset.name == platform.checksum_name() && asset.browser_download_url.starts_with("https://"))
 }
 
+fn signature_asset<'a>(release: &'a GhRelease, platform: Platform) -> Option<&'a GhAsset> {
+    let name = format!("{}{}", platform.checksum_name(), UPDATE_SIGNATURE_SUFFIX);
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name == name && asset.browser_download_url.starts_with("https://"))
+}
+
+fn decode_signature(value: &str) -> Result<Vec<u8>, String> {
+    let compact: String = value.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if compact.len() != 128 {
+        return Err("Файл подписи должен содержать 64 байта в hex".into());
+    }
+    let mut bytes = Vec::with_capacity(64);
+    for pair in compact.as_bytes().chunks_exact(2) {
+        let pair = std::str::from_utf8(pair).map_err(|_| "Некорректная подпись")?;
+        bytes.push(u8::from_str_radix(pair, 16).map_err(|_| "Некорректная hex-подпись")?);
+    }
+    Ok(bytes)
+}
+
+fn verify_checksum_signature(checksum: &[u8], signature_hex: &str) -> Result<(), String> {
+    let signature = decode_signature(signature_hex)?;
+    let signature = Signature::from_slice(&signature).map_err(|_| "Некорректная подпись Ed25519")?;
+    let key = VerifyingKey::from_bytes(&UPDATE_PUBLIC_KEY).map_err(|_| "Некорректный публичный ключ обновления")?;
+    key.verify_strict(checksum, &signature)
+        .map_err(|_| "Подпись SHA256SUMS не совпала с ключом KartoshkaVPN".into())
+}
+
 fn install_location_reason(platform: Platform) -> Option<String> {
     if platform != Platform::Macos {
         return None;
@@ -224,6 +263,7 @@ fn evaluate_release(
     let available = latest > current;
     let asset = asset_for(release, &latest.to_string(), platform);
     let checksum = checksum_asset(release, platform);
+    let signature = signature_asset(release, platform);
     let mut reason = None;
     if available && asset.is_none() {
         reason = Some(format!(
@@ -233,10 +273,17 @@ fn evaluate_release(
         ));
     } else if available && checksum.is_none() {
         reason = Some(format!("В релизе {} нет файла контрольных сумм {}.", latest, platform.checksum_name()));
+    } else if available && signature.is_none() {
+        reason = Some(format!(
+            "В релизе {} нет подписи {}{}. Обновление заблокировано.",
+            latest,
+            platform.checksum_name(),
+            UPDATE_SIGNATURE_SUFFIX
+        ));
     } else if available {
         reason = install_location_reason(platform);
     }
-    let can_install = available && asset.is_some() && checksum.is_some() && reason.is_none();
+    let can_install = available && asset.is_some() && checksum.is_some() && signature.is_some() && reason.is_none();
     Ok(ClientUpdateInfo {
         current_version: current.to_string(),
         latest_version: latest.to_string(),
@@ -253,6 +300,8 @@ fn evaluate_release(
         asset_name: asset.map(|item| item.name.clone()),
         asset_size: asset.map(|item| item.size).unwrap_or(0),
         checksum_name: checksum.map(|item| item.name.clone()),
+        signature_name: signature.map(|item| item.name.clone()),
+        signature_verified: false,
         can_install,
         reason,
         platform: platform.label().to_string(),
@@ -333,6 +382,21 @@ async fn download_text(client: &reqwest::Client, url: &str) -> Result<String, St
         .map_err(|error| format!("Не удалось прочитать контрольные суммы: {error}"))
 }
 
+async fn signed_checksum(
+    client: &reqwest::Client,
+    release: &GhRelease,
+    platform: Platform,
+) -> Result<String, String> {
+    let checksum = checksum_asset(release, platform)
+        .ok_or("В релизе нет файла контрольных сумм")?;
+    let signature = signature_asset(release, platform)
+        .ok_or("В релизе нет подписи контрольных сумм")?;
+    let checksum_text = download_text(client, &checksum.browser_download_url).await?;
+    let signature_hex = download_text(client, &signature.browser_download_url).await?;
+    verify_checksum_signature(checksum_text.as_bytes(), &signature_hex)?;
+    Ok(checksum_text)
+}
+
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::write(path, bytes).map_err(|error| format!("Не удалось сохранить обновление: {error}"))
 }
@@ -358,7 +422,24 @@ pub async fn check_client_update(app: AppHandle) -> Result<ClientUpdateInfo, Str
     let current = app.package_info().version.to_string();
     let client = http_client(Duration::from_secs(20))?;
     let release = fetch_release(&client).await?;
-    let info = evaluate_release(&release, &current, Platform::current())?;
+    let mut info = evaluate_release(&release, &current, Platform::current())?;
+    if info.available && info.can_install {
+        match signed_checksum(&client, &release, Platform::current()).await {
+            Ok(text) => {
+                let asset_name = info.asset_name.clone().unwrap_or_default();
+                if checksum_for(&text, &asset_name).is_none() {
+                    info.can_install = false;
+                    info.reason = Some(format!("В подписанных контрольных суммах нет записи для {asset_name}"));
+                } else {
+                    info.signature_verified = true;
+                }
+            }
+            Err(error) => {
+                info.can_install = false;
+                info.reason = Some(error);
+            }
+        }
+    }
     super::append_log(
         &app,
         &format!(
@@ -388,9 +469,7 @@ pub async fn install_client_update(app: AppHandle, version: String) -> Result<()
     let latest = parse_version(&info.latest_version)?;
     let asset = asset_for(&release, &latest.to_string(), platform)
         .ok_or("В релизе нет установщика для этой платформы")?;
-    let checksum_asset = checksum_asset(&release, platform)
-        .ok_or("В релизе нет файла контрольных сумм")?;
-    let checksum_text = download_text(&client, &checksum_asset.browser_download_url).await?;
+    let checksum_text = signed_checksum(&client, &release, platform).await?;
     let expected_hash = checksum_for(&checksum_text, &asset.name)
         .ok_or_else(|| format!("В контрольных суммах нет записи для {}", asset.name))?;
     let bytes = download_asset(&app, &client, asset).await?;
@@ -403,6 +482,7 @@ pub async fn install_client_update(app: AppHandle, version: String) -> Result<()
             return Err("SHA-256 не совпал с digest GitHub. Установка отменена.".into());
         }
     }
+    update_log("SHA256SUMS: подпись Ed25519 проверена, SHA-256 установщика совпал");
     let ext = match platform {
         Platform::Windows => "exe",
         Platform::Macos => "dmg",
@@ -519,19 +599,50 @@ fn run_checked(program: &str, args: &[&str]) -> Result<String, String> {
 #[cfg(windows)]
 fn install_windows(artifact: &Path, target: &Path) -> Result<(), String> {
     update_log(&format!("Windows: запускаем {}", artifact.display()));
+    let backup = target.with_extension("exe.kartoshka-old");
+    let _ = fs::remove_file(&backup);
+    if target.exists() {
+        fs::copy(target, &backup).map_err(|error| format!("Не удалось сохранить старую версию: {error}"))?;
+    }
     let silent = Command::new(artifact).arg("/S").status();
     if !matches!(silent, Ok(status) if status.success()) {
         update_log("Windows: тихая установка не удалась, открываем обычный установщик");
-        Command::new(artifact)
+        let status = Command::new(artifact)
             .status()
             .map_err(|error| format!("Не удалось запустить установщик: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "Установщик завершился с ошибкой {status}. Журнал: {}",
+                std::env::temp_dir().join("kartoshka-update.log").display()
+            ));
+        }
     }
     std::thread::sleep(Duration::from_secs(4));
-    if target.exists() {
-        Command::new(target)
-            .spawn()
-            .map_err(|error| format!("Не удалось перезапустить приложение: {error}"))?;
+    if !target.exists() {
+        if backup.exists() {
+            let _ = fs::copy(&backup, target);
+        }
+        return Err(format!(
+            "После установки не найден {}; предыдущая версия восстановлена. Журнал: {}",
+            target.display(),
+            std::env::temp_dir().join("kartoshka-update.log").display()
+        ));
     }
+    let mut child = Command::new(target)
+        .spawn()
+        .map_err(|error| format!("Не удалось перезапустить приложение: {error}"))?;
+    std::thread::sleep(Duration::from_secs(8));
+    if let Ok(Some(status)) = child.try_wait() {
+        if backup.exists() {
+            let _ = fs::copy(&backup, target);
+        }
+        return Err(format!(
+            "Новая версия завершилась сразу после запуска ({status}); восстановлена предыдущая версия. Журнал: {}",
+            std::env::temp_dir().join("kartoshka-update.log").display()
+        ));
+    }
+    let _ = fs::remove_file(&backup);
+    update_log("Windows: новая версия запущена, резервная копия удалена");
     Ok(())
 }
 
@@ -552,15 +663,12 @@ fn find_app(mount: &Path) -> Result<PathBuf, String> {
 #[cfg(target_os = "macos")]
 fn admin_replace(staging: &Path, target: &Path) -> Result<(), String> {
     let script = std::env::temp_dir().join(format!("kartoshka-update-{}.sh", std::process::id()));
-    let next = target.with_extension("app.kartoshka-new");
+    let backup = backup_for(target);
     let body = format!(
-        "#!/bin/sh\nset -e\nrm -rf -- {}\nditto {} {}\nrm -rf -- {}\nmv {} {}\n",
-        shell_quote(&next.to_string_lossy()),
-        shell_quote(&staging.to_string_lossy()),
-        shell_quote(&next.to_string_lossy()),
-        shell_quote(&target.to_string_lossy()),
-        shell_quote(&next.to_string_lossy()),
-        shell_quote(&target.to_string_lossy())
+        "#!/bin/sh\nset -e\nrm -rf -- {backup}\nmv {target} {backup}\nif ! ditto {staging} {target}; then\n  rm -rf -- {target}\n  mv {backup} {target}\n  exit 1\nfi\n",
+        backup = shell_quote(&backup.to_string_lossy()),
+        target = shell_quote(&target.to_string_lossy()),
+        staging = shell_quote(&staging.to_string_lossy()),
     );
     fs::write(&script, body).map_err(|error| format!("Не удалось создать скрипт обновления: {error}"))?;
     #[cfg(unix)]
@@ -585,8 +693,67 @@ fn admin_replace(staging: &Path, target: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn replace_app(staging: &Path, target: &Path) -> Result<(), String> {
-    let backup = target.with_extension("app.kartoshka-old");
+fn backup_for(target: &Path) -> PathBuf {
+    target.with_extension("app.kartoshka-old")
+}
+
+#[cfg(target_os = "macos")]
+fn restore_backup(target: &Path, backup: &Path) -> Result<(), String> {
+    if !backup.is_dir() {
+        return Err(format!("Резервная копия приложения не найдена: {}", backup.display()));
+    }
+    let _ = fs::remove_dir_all(target);
+    fs::rename(backup, target).map_err(|error| {
+        format!(
+            "Не удалось вернуть старую версию: {error}. Резервная копия: {}",
+            backup.display()
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn launched_from(target: &Path) -> bool {
+    let executable = target.join("Contents/MacOS/kartoshka-vpn");
+    let output = Command::new("/bin/ps")
+        .args(["-ax", "-o", "command="])
+        .output();
+    output
+        .map(|output| {
+            let needle = executable.to_string_lossy();
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.contains(needle.as_ref()))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn launch_and_verify(target: &Path, backup: &Path) -> Result<(), String> {
+    Command::new("/usr/bin/open")
+        .args(["-n"])
+        .arg(target)
+        .spawn()
+        .map_err(|error| format!("Не удалось запустить новую версию: {error}"))?;
+    std::thread::sleep(Duration::from_secs(8));
+    if launched_from(target) {
+        let _ = fs::remove_dir_all(backup);
+        update_log("macOS: новая версия запущена, резервная копия удалена");
+        Ok(())
+    } else {
+        let restore = restore_backup(target, backup);
+        match restore {
+            Ok(()) => {
+                let _ = Command::new("/usr/bin/open").arg(target).spawn();
+                Err("Новая версия не запустилась; восстановлена предыдущая версия".into())
+            }
+            Err(error) => Err(format!("Новая версия не запустилась; {error}")),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn replace_app(staging: &Path, target: &Path) -> Result<PathBuf, String> {
+    let backup = backup_for(target);
     let _ = fs::remove_dir_all(&backup);
     fs::rename(target, &backup).map_err(|error| format!("Не удалось подготовить замену приложения: {error}"))?;
     let staging_string = staging.to_string_lossy().to_string();
@@ -595,10 +762,7 @@ fn replace_app(staging: &Path, target: &Path) -> Result<(), String> {
         "/usr/bin/ditto",
         &[&staging_string, &target_string],
     ) {
-        Ok(_) => {
-            let _ = fs::remove_dir_all(&backup);
-            Ok(())
-        }
+        Ok(_) => Ok(backup),
         Err(error) => {
             let _ = fs::remove_dir_all(target);
             let _ = fs::rename(&backup, target);
@@ -627,20 +791,20 @@ fn install_macos(artifact: &Path, target: &Path) -> Result<(), String> {
         if !staging.join("Contents/MacOS").is_dir() {
             return Err("Скопированное приложение повреждено".into());
         }
-        match replace_app(&staging, target) {
-            Ok(()) => {}
+        let backup = match replace_app(&staging, target) {
+            Ok(backup) => backup,
             Err(direct_error) => {
                 update_log(&format!("macOS: прямая замена не удалась ({direct_error}); пробуем администратора"));
                 admin_replace(&staging, target)?;
+                backup_for(target)
             }
-        }
+        };
         let _ = fs::remove_dir_all(&staging);
-        Ok(())
+        launch_and_verify(target, &backup)
     })();
     let _ = run_checked("/usr/bin/hdiutil", &["detach", &mount_string, "-force"]);
     let _ = fs::remove_dir_all(&mount);
     result?;
-    let _ = Command::new("/usr/bin/open").arg(target).spawn();
     update_log("macOS: новая версия установлена и запущена");
     Ok(())
 }
@@ -707,8 +871,10 @@ mod tests {
             "assets": [
                 {"name": "KartoshkaVPN_0.9.9_x64-setup.exe", "browser_download_url": "https://example.test/app.exe", "size": 10},
                 {"name": "SHA256SUMS.txt", "browser_download_url": "https://example.test/SHA256SUMS.txt", "size": 100},
+                {"name": "SHA256SUMS.txt.sig", "browser_download_url": "https://example.test/SHA256SUMS.txt.sig", "size": 128},
                 {"name": "KartoshkaVPN_0.9.9_universal.dmg", "browser_download_url": "https://example.test/app.dmg", "size": 20},
-                {"name": "SHA256SUMS-macos.txt", "browser_download_url": "https://example.test/SHA256SUMS-macos.txt", "size": 100}
+                {"name": "SHA256SUMS-macos.txt", "browser_download_url": "https://example.test/SHA256SUMS-macos.txt", "size": 100},
+                {"name": "SHA256SUMS-macos.txt.sig", "browser_download_url": "https://example.test/SHA256SUMS-macos.txt.sig", "size": 128}
             ]
         }))
         .expect("fixture")
@@ -748,6 +914,25 @@ mod tests {
         let info = evaluate_release(&release(), "0.9.9", Platform::Windows).unwrap();
         assert!(!info.available);
         assert!(!info.can_install);
+    }
+
+    #[test]
+    fn refuses_without_signature() {
+        let mut release = release();
+        release.assets.retain(|asset| !asset.name.ends_with(".sig"));
+        let info = evaluate_release(&release, "0.9.8", Platform::Windows).unwrap();
+        assert!(info.available);
+        assert!(!info.can_install);
+        assert!(info.reason.unwrap().contains("подписи"));
+    }
+
+    #[test]
+    fn verifies_ed25519_signature_of_checksum_file() {
+        let checksum = b"KartoshkaVPN test checksum\n";
+        let signature = "79c57c683bca7585928aa6f6c87573ff6e61d89452fc24cf3544b4dab41f520d6fdc7ef1d9be3eff181937d76df37adb7dbdb7c25a79d080058a644bc053240c";
+        assert!(verify_checksum_signature(checksum, signature).is_ok());
+        assert!(verify_checksum_signature(b"different", signature).is_err());
+        assert!(decode_signature("not hex").is_err());
     }
 
     #[test]

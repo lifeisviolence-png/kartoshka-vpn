@@ -1021,7 +1021,13 @@ fn spawn_xray(binary: &Path, assets: &Path, config: &str, check_only: bool) -> R
     configure_command(&mut command, assets);
     command.arg("run");
     if check_only { command.arg("-test"); }
-    let mut child = command.args(["-config", "stdin:"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("Не удалось запустить Xray: {e}"))?;
+    let mut child = command
+        .args(["-config", "stdin:"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| xray_launch_error(binary, &error))?;
     send_config(&mut child, config, CONFIG_WRITE_TIMEOUT)?;
     Ok(child)
 }
@@ -1374,9 +1380,153 @@ fn inspect_runtime(runtime: &mut ProxyRuntime) -> MonitorHealth {
         },
     }
 }
+fn xray_binary_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "xray.exe"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "xray"
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        "xray"
+    }
+}
+
 fn xray_path() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    Ok(exe.parent().ok_or("Не найдена папка приложения")?.join("xray.exe"))
+    let dir = exe.parent().ok_or("Не найдена папка приложения")?;
+    let sidecar = dir.join(xray_binary_name());
+    if sidecar.is_file() {
+        return Ok(sidecar);
+    }
+    let resource = dir.join("../Resources").join(xray_binary_name());
+    if resource.is_file() {
+        return Ok(resource);
+    }
+    Ok(sidecar)
+}
+
+fn mask_home(value: &str) -> String {
+    let mut result = value.to_string();
+    for name in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(name) {
+            let home = home.to_string_lossy();
+            if !home.is_empty() {
+                result = result.replace(home.as_ref(), "~");
+            }
+        }
+    }
+    result
+}
+
+fn macos_major_version() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("/usr/bin/sw_vers").arg("-productVersion").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .split('.')
+            .next()
+            .and_then(|part| part.parse().ok())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn xray_launch_diagnostics(app: &AppHandle) -> String {
+    let binary = xray_path().map(|path| path.to_string_lossy().to_string()).unwrap_or_else(|e| format!("<{e}>"));
+    let path = PathBuf::from(&binary);
+    let exists = path.is_file();
+    let executable = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            path.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            exists
+        }
+    };
+    let arch = {
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("/usr/bin/file")
+                .arg("-b")
+                .arg(&path)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .unwrap_or_else(|| "неизвестно".into())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            "не применимо".to_string()
+        }
+    };
+    let assets = app.path().resource_dir().map(|dir| dir.join("xray-assets")).unwrap_or_default();
+    let geodata = format!(
+        "geoip={} geosite={}",
+        assets.join("geoip.dat").exists(),
+        assets.join("geosite.dat").exists()
+    );
+    let data = app.path().app_config_dir().map(|dir| dir.to_string_lossy().to_string()).unwrap_or_else(|_| "недоступен".into());
+    let quarantine = {
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("/usr/bin/xattr")
+                .args(["-p", "com.apple.quarantine"])
+                .arg(&path)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "нет".into())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            "не применимо".to_string()
+        }
+    };
+    format!(
+        "path={} exists={} executable={} arch={} assets={} {} data={} quarantine={} macOS={}",
+        mask_home(&binary),
+        exists,
+        executable,
+        arch,
+        mask_home(&assets.to_string_lossy()),
+        geodata,
+        mask_home(&data),
+        quarantine,
+        macos_major_version().map(|v| v.to_string()).unwrap_or_else(|| "неизвестно".into())
+    )
+}
+
+fn xray_launch_error(path: &Path, error: &std::io::Error) -> String {
+    let technical = error.to_string().to_ascii_lowercase();
+    let code = if technical.contains("bad cpu")
+        || technical.contains("exec format")
+        || technical.contains("architecture")
+    {
+        "CORE_LAUNCH_ARCH"
+    } else if !path.exists() || error.kind() == std::io::ErrorKind::NotFound {
+        "CORE_LAUNCH_NOT_FOUND"
+    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+        "CORE_LAUNCH_PERMISSION"
+    } else {
+        "CORE_LAUNCH_FAILED"
+    };
+    format!("{code}: {error}")
 }
 
 #[tauri::command]
@@ -1562,6 +1712,7 @@ fn collect_diagnostics(app: AppHandle) -> Result<String, String> {
     let core_tail: Vec<&str> = core.lines().rev().take(300).collect();
     let mut text = format!("КартошкаVPN {}\nЯдро: {}\n\n=== app.log (kartoshka.log) ===\n{}\n=== core.log (последние 300 строк) ===\n{}\n=== Настройки proxy Windows ===\n{}\n",
         env!("CARGO_PKG_VERSION"), core_version(), app_log, core_tail.into_iter().rev().collect::<Vec<_>>().join("\n"), proxy_dump());
+    text.push_str(&format!("=== Запуск Xray ===\n{}\n", xray_launch_diagnostics(&app)));
     if let Ok(warning) = PROXY_WARNING.lock() { if let Some(value) = warning.as_ref() { text.push_str(&format!("=== Предупреждение ===\n{value}\n")); } }
     Ok(redact_diagnostics(&text))
 }
@@ -1586,6 +1737,11 @@ async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: 
     let path = snapshot_path(&app)?;
     let binary = xray_path()?;
     let assets = app.path().resource_dir().map_err(|e| format!("Не найдены ресурсы Xray: {e}"))?.join("xray-assets");
+    append_log(&app, &format!("Проверка запуска Xray: {}", xray_launch_diagnostics(&app)));
+    #[cfg(target_os = "macos")]
+    if macos_major_version().map(|major| major < 13).unwrap_or(false) {
+        return Err("CORE_LAUNCH_OS: Xray 26.10.31 требует macOS 13 или новее".into());
+    }
     // Debug mode only changes where the core writes its own diagnostics: the
     // process still receives the configuration over stdin and never logs secrets.
     let mut config_json = config_json;
@@ -1610,7 +1766,7 @@ async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: 
     }).await.map_err(|e| e.to_string())??;
     match &result {
         Ok(_) => append_log(&app, "Xray и watchdog запущены; обход WinINet: <local>, 127.0.0.1, [::1]."),
-        Err(error) => append_log(&app, &format!("Ошибка включения proxy: {error}; {}", last_proxy_dump())),
+        Err(error) => append_log(&app, &format!("Ошибка включения proxy: {error}; {}; {}", last_proxy_dump(), xray_launch_diagnostics(&app))),
     }
     if result.is_ok() {
         if let Some(warning) = PROXY_WARNING.lock().ok().and_then(|guard| guard.clone()) { append_log(&app, &format!("Предупреждение proxy: {warning}; {}", last_proxy_dump())); }
@@ -1851,6 +2007,15 @@ fn main() {
 #[cfg(test)]
 mod proxy_policy_tests {
     use super::*;
+    #[test]
+    fn xray_binary_name_matches_the_platform() {
+        #[cfg(windows)]
+        assert_eq!(xray_binary_name(), "xray.exe");
+        #[cfg(target_os = "macos")]
+        assert_eq!(xray_binary_name(), "xray");
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        assert_eq!(xray_binary_name(), "xray");
+    }
     #[test]
     fn pac_verdict_follows_registry_state_not_the_stale_ui_bit() {
         assert_eq!(pac_verdict(0, None, false), PacVerdict::Clear);

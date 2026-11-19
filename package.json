@@ -1,7 +1,7 @@
 {
   "name": "kartovpn",
   "private": true,
-  "version": "0.9.9",
+  "version": "0.9.10",
   "packageManager": "pnpm@11.25.0",
   "type": "module",
   "scripts": {
