@@ -174,21 +174,6 @@ mod windows {
         }
         Err(format!("Не удалось прочитать флаги WinINet: {}", io::Error::last_os_error()))
     }
-    // Reads the auto-config URL as WinINet sees it. The registry value can be
-    // stale while DefaultConnectionSettings still holds an active PAC script.
-    pub fn autoconfig_url() -> Result<Option<String>, String> {
-        let mut option = PerOption { option: 4, value: 0 };
-        let mut list = option_list(&mut option);
-        let mut len = std::mem::size_of::<PerOptions>() as u32;
-        if unsafe { InternetQueryOptionW(0, 75, &mut list as *mut _ as *mut c_void, &mut len) } == 0 { return Ok(None); }
-        if option.value == 0 { return Ok(None); }
-        let ptr = option.value as *const u16;
-        let mut units = 0usize;
-        while units < 32768 && unsafe { *ptr.add(units) } != 0 { units += 1; }
-        let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, units) });
-        unsafe { LocalFree(option.value as *mut c_void); }
-        Ok(if text.trim().is_empty() { None } else { Some(text) })
-    }
     pub fn set_flags(value: u32) -> Result<(), String> {
         let mut option = PerOption { option: 1, value: value as usize };
         let mut list = option_list(&mut option);
@@ -497,8 +482,11 @@ fn proxy_dump() -> String {
     format!("flags={flags}; AutoConfigURL={}; AutoDetect={}; ProxyEnable={}; ProxyServer={}; ProxyOverride={}",
         registry_value_text("AutoConfigURL"), registry_value_text("AutoDetect"), registry_value_text("ProxyEnable"), registry_value_text("ProxyServer"), registry_value_text("ProxyOverride"))
 }
+// The registry value is the source of truth for a PAC URL. The WinINet query
+// can keep returning a script from DefaultConnectionSettings after the value was
+// removed, which would falsely block a clean start (the 0.9.6 report).
 fn effective_pac_url() -> Option<String> {
-    windows::autoconfig_url().ok().flatten().or_else(|| windows::get("AutoConfigURL").ok().flatten().and_then(|value| registry_text(&Some(value))))
+    registry_text(&windows::get("AutoConfigURL").ok().flatten())
 }
 static PROXY_WARNING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 static LAST_PROXY_DUMP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
