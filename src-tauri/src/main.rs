@@ -342,7 +342,10 @@ mod windows {
         Err("Уже запущен другой экземпляр КартошкаVPN".into())
     }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "macos_proxy.rs"]
+mod windows;
+#[cfg(all(not(windows), not(target_os = "macos")))]
 mod windows {
     use super::RawValue;
     pub struct Instance;
@@ -503,8 +506,17 @@ fn save_snapshot(path: &Path, snapshot: &ProxySnapshot) -> Result<(), String> {
         let _ = fs::remove_file(path);
         return Err(format!("Не удалось записать snapshot: {e}"));
     }
+    restrict_file(path);
     Ok(())
 }
+#[cfg(unix)]
+fn restrict_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_file(_: &Path) {}
+
 fn load_snapshot(path: &Path) -> Result<ProxySnapshot, String> {
     let bytes = fs::read(path).map_err(|e| format!("Не удалось прочитать snapshot: {e}"))?;
     // Legacy v2 JSON is read as-is, never deleted or migrated unless restoration succeeds.
@@ -732,6 +744,7 @@ fn save_secure_state(app: AppHandle, contents: String) -> Result<(), String> {
     fs::write(&tmp, &data).map_err(|e| format!("Не удалось записать настройки: {e}"))?;
     let _ = fs::remove_file(&path);
     fs::rename(&tmp, &path).map_err(|e| format!("Не удалось заменить настройки: {e}"))?;
+    restrict_file(&path);
     Ok(())
 }
 // A profile locked to another Windows user cannot be decrypted. The app offers
@@ -748,7 +761,9 @@ fn reset_secure_state(app: AppHandle) -> Result<(), String> {
 
 // Closing the window hides it only when the user enabled that option in settings.
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
 const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<bool, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Не удалось определить путь приложения: {e}"))?;
@@ -766,6 +781,7 @@ fn set_autostart(enabled: bool) -> Result<bool, String> {
     if enabled && !status.success() { return Err("Windows отклонила запись автозапуска".into()); }
     Ok(enabled)
 }
+#[cfg(windows)]
 #[tauri::command]
 fn autostart_enabled() -> bool {
     std::process::Command::new("reg")
@@ -773,6 +789,26 @@ fn autostart_enabled() -> bool {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+}
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<bool, String> {
+    windows::set_autostart(enabled)
+}
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn autostart_enabled() -> bool {
+    windows::autostart_enabled()
+}
+#[cfg(all(not(windows), not(target_os = "macos")))]
+#[tauri::command]
+fn set_autostart(_: bool) -> Result<bool, String> {
+    Err("Автозапуск поддерживается только в Windows и macOS".into())
+}
+#[cfg(all(not(windows), not(target_os = "macos")))]
+#[tauri::command]
+fn autostart_enabled() -> bool {
+    false
 }
 #[tauri::command]
 fn set_close_to_tray(enabled: bool) {
@@ -793,7 +829,9 @@ fn open_external(url: String) -> Result<(), String> {
     }
     #[cfg(windows)]
     let result = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let result = std::process::Command::new("xdg-open").arg(url).spawn();
     result.map(|_| ()).map_err(|e| format!("Не удалось открыть ссылку: {e}"))
 }
