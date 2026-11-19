@@ -174,6 +174,21 @@ mod windows {
         }
         Err(format!("Не удалось прочитать флаги WinINet: {}", io::Error::last_os_error()))
     }
+    // Reads the auto-config URL as WinINet sees it. The registry value can be
+    // stale while DefaultConnectionSettings still holds an active PAC script.
+    pub fn autoconfig_url() -> Result<Option<String>, String> {
+        let mut option = PerOption { option: 4, value: 0 };
+        let mut list = option_list(&mut option);
+        let mut len = std::mem::size_of::<PerOptions>() as u32;
+        if unsafe { InternetQueryOptionW(0, 75, &mut list as *mut _ as *mut c_void, &mut len) } == 0 { return Ok(None); }
+        if option.value == 0 { return Ok(None); }
+        let ptr = option.value as *const u16;
+        let mut units = 0usize;
+        while units < 32768 && unsafe { *ptr.add(units) } != 0 { units += 1; }
+        let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, units) });
+        unsafe { LocalFree(option.value as *mut c_void); }
+        Ok(if text.trim().is_empty() { None } else { Some(text) })
+    }
     pub fn set_flags(value: u32) -> Result<(), String> {
         let mut option = PerOption { option: 1, value: value as usize };
         let mut list = option_list(&mut option);
@@ -431,6 +446,26 @@ fn same_indicator(name: &str, a: &Option<RawValue>, b: &Option<RawValue>) -> boo
 // look at those bits instead of comparing the whole word.
 const PAC_BITS: u32 = 4 | 8;
 fn has_pac(flags: u32) -> bool { flags & PAC_BITS != 0 }
+// FLAGS_UI is a presentation value: its auto-detect bit may come from the
+// DefaultConnectionSettings blob even when the AutoDetect registry value is
+// absent or 0. A real PAC URL is authoritative and still blocks; residual bits
+// without a URL or AutoDetect are reported but must not make the app unusable.
+#[derive(Debug, PartialEq, Eq)]
+enum PacVerdict { Clear, WarnAutoDetect, WarnPacBit, BlockUrl, BlockAutoDetect }
+fn pac_verdict(flags: u32, url: Option<&str>, auto_detect: bool) -> PacVerdict {
+    if url.map(|value| !value.trim().is_empty()).unwrap_or(false) { return PacVerdict::BlockUrl; }
+    if auto_detect { return PacVerdict::BlockAutoDetect; }
+    if flags & 8 != 0 { return PacVerdict::WarnAutoDetect; }
+    if flags & 4 != 0 { return PacVerdict::WarnPacBit; }
+    PacVerdict::Clear
+}
+fn pac_warning(flags: u32, verdict: &PacVerdict) -> Option<String> {
+    match verdict {
+        PacVerdict::WarnAutoDetect => Some(format!("Windows сообщает остаточный бит автоопределения (flags={flags}), но AutoConfigURL и AutoDetect пусты. Подключение продолжено. Если сайты не открываются, выключите «Определять параметры автоматически» в Параметрах Windows → Сеть и Интернет → Прокси.")),
+        PacVerdict::WarnPacBit => Some(format!("Windows сообщает остаточный бит PAC без адреса скрипта (flags={flags}). Подключение продолжено. Если сайты не открываются, проверьте «Использовать скрипт настройки» в Параметрах Windows → Прокси.")),
+        _ => None,
+    }
+}
 fn wait_no_pac(timeout: Duration) -> u32 {
     let deadline = Instant::now() + timeout;
     loop {
@@ -443,10 +478,33 @@ fn wait_local_proxy(timeout: Duration) -> u32 {
     let deadline = Instant::now() + timeout;
     loop {
         let flags = windows::flags().unwrap_or(0);
-        if flags & 2 != 0 && !has_pac(flags) || Instant::now() >= deadline { return flags; }
+        let enabled = matches!(windows::get("ProxyEnable"), Ok(Some(value)) if value.kind == 4 && value.bytes == 1u32.to_le_bytes());
+        if enabled || Instant::now() >= deadline { return flags; }
         std::thread::sleep(Duration::from_millis(25));
     }
 }
+fn registry_value_text(name: &str) -> String {
+    match windows::get(name) {
+        Ok(Some(value)) if value.kind == 1 => registry_text(&Some(value)).unwrap_or_default(),
+        Ok(Some(value)) if value.kind == 4 && value.bytes.len() == 4 => u32::from_le_bytes([value.bytes[0], value.bytes[1], value.bytes[2], value.bytes[3]]).to_string(),
+        Ok(Some(_)) => "<другой тип>".into(),
+        Ok(None) => "<нет>".into(),
+        Err(e) => format!("<ошибка: {e}>"),
+    }
+}
+fn proxy_dump() -> String {
+    let flags = windows::flags().map(|value| value.to_string()).unwrap_or_else(|e| format!("<ошибка: {e}>"));
+    format!("flags={flags}; AutoConfigURL={}; AutoDetect={}; ProxyEnable={}; ProxyServer={}; ProxyOverride={}",
+        registry_value_text("AutoConfigURL"), registry_value_text("AutoDetect"), registry_value_text("ProxyEnable"), registry_value_text("ProxyServer"), registry_value_text("ProxyOverride"))
+}
+fn effective_pac_url() -> Option<String> {
+    windows::autoconfig_url().ok().flatten().or_else(|| windows::get("AutoConfigURL").ok().flatten().and_then(|value| registry_text(&Some(value))))
+}
+static PROXY_WARNING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static LAST_PROXY_DUMP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+fn store_proxy_dump(dump: &str) { if let Ok(mut guard) = LAST_PROXY_DUMP.lock() { *guard = dump.to_string(); } }
+fn take_proxy_warning() -> Option<String> { PROXY_WARNING.lock().ok().and_then(|mut guard| guard.take()) }
+fn last_proxy_dump() -> String { LAST_PROXY_DUMP.lock().map(|guard| guard.clone()).unwrap_or_default() }
 fn save_snapshot(path: &Path, snapshot: &ProxySnapshot) -> Result<(), String> {
     let json = serde_json::to_vec(snapshot).map_err(|e| e.to_string())?;
     let mut data = b"KPV3-DPAPI\0".to_vec();
@@ -582,26 +640,25 @@ fn restore_snapshot_locked(path: &Path) -> Result<(), String> {
     fs::remove_file(path).map_err(|e| format!("Настройки восстановлены, но snapshot не удалён: {e}"))
 }
 fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog: &mut Child) -> Result<(), String> {
-    let dump = || NAMES.iter().map(|name| format!("{name}={:?}", windows::get(name).unwrap_or(None))).collect::<Vec<_>>().join(" ");
+    store_proxy_dump(&proxy_dump());
     // Detect changes since capture, including the bypass list, before making writes.
     for c in &snapshot.changes {
         if !same_indicator(&c.name, &windows::get(&c.name)?, &c.before) { return Err(format!("{} изменился во время запуска; proxy не включён", c.name)); }
     }
-    let current_flags = windows::flags()?;
-    if has_pac(current_flags) != has_pac(snapshot.before_flags) { return Err(format!("Появился PAC/автоопределение до записи: {current_flags}; {}", dump())); }
+    // WinINet keeps the effective PAC script in DefaultConnectionSettings, so a
+    // registry-only comparison can miss another program's script. A captured PAC
+    // baseline is disabled by this transaction; a new one is not ours.
+    let before_url = snapshot.changes.iter().find(|c| c.name == "AutoConfigURL").and_then(|c| c.before.as_ref()).and_then(|value| registry_text(&Some(value.clone()))).unwrap_or_default();
+    if let Some(url) = effective_pac_url().filter(|value| !value.trim().is_empty()) {
+        if before_url.trim().is_empty() { return Err("Появился PAC-скрипт до включения proxy. Отключите его в Параметрах Windows → Прокси и повторите.".into()); }
+        let _ = url; // the captured baseline is intentionally replaced below
+    }
     let mut writes = 0;
     let mut completed: Vec<&str> = Vec::new();
-    // The PAC bits disappear as soon as AutoConfigURL/AutoDetect are written, so the
-    // expected flag state follows the writes we already made instead of the capture.
-    let pac_expected = |done: &[&str]| -> bool {
-        if done.iter().any(|name| *name == "AutoConfigURL" || *name == "AutoDetect") { has_pac(snapshot.applied_flags) } else { has_pac(snapshot.before_flags) }
-    };
     for c in snapshot.changes.iter().filter(|c| c.managed) {
         check_watchdog(watchdog)?;
-        let current_flags = windows::flags()?;
-        if has_pac(current_flags) != pac_expected(&completed) { return Err(format!("Появился PAC/автоопределение перед записью {}: {current_flags}; {}", c.name, dump())); }
-        // Check the whole set again before each step. This narrows, but cannot eliminate,
-        // races with external programs because Windows Registry has no compare-and-swap.
+        // Check the whole set again before each step. This narrows, but cannot
+        // eliminate, races with external programs because the registry has no CAS.
         for check in &snapshot.changes {
             let expected = if completed.contains(&check.name.as_str()) { &check.applied } else { &check.before };
             if !same_indicator(&check.name, &windows::get(&check.name)?, expected) { return Err(format!("{} изменился во время запуска", check.name)); }
@@ -610,10 +667,8 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
         completed.push(&c.name);
         if fail_after == Some(writes) { return Err("Тестовая ошибка записи proxy".into()); }
     }
-    let current_flags = windows::flags()?;
-    // We write AutoConfigURL=None and AutoDetect=0, so the expected state after
-    // the values are applied is the applied_flags word, not the captured one.
-    if has_pac(current_flags) != has_pac(snapshot.applied_flags) { return Err(format!("Появился PAC/автоопределение после значений: {current_flags}; {}", dump())); }
+    // Values are the source of truth. FLAGS_UI can keep a stale auto-detect bit
+    // from DefaultConnectionSettings, so it is judged only after the values.
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
         if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился до включения WinINet", c.name)); }
@@ -621,7 +676,22 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
     check_watchdog(watchdog)?;
     windows::set_flags(snapshot.applied_flags)?;
     let applied = wait_local_proxy(Duration::from_secs(2));
-    if applied & 2 == 0 || has_pac(applied) { return Err(format!("WinINet не включил локальный proxy: флаги {applied}")); }
+    let auto_detect = indicator_on(&windows::get("AutoDetect")?);
+    let url = effective_pac_url();
+    let verdict = pac_verdict(applied, url.as_deref(), auto_detect);
+    match verdict {
+        PacVerdict::BlockUrl => return Err("Windows всё ещё использует PAC-скрипт. Отключите «Использовать скрипт настройки» в Параметрах Windows → Прокси и повторите.".into()),
+        PacVerdict::BlockAutoDetect => return Err("Windows всё ещё включает автоопределение proxy. Выключите «Определять параметры автоматически» и повторите.".into()),
+        _ => {}
+    }
+    if let Some(warning) = pac_warning(applied, &verdict) {
+        if let Ok(mut guard) = PROXY_WARNING.lock() { *guard = Some(warning); }
+    }
+    let enabled = indicator_on(&windows::get("ProxyEnable")?);
+    let server = registry_text(&windows::get("ProxyServer")?);
+    if !enabled || server.as_deref() != Some(LOCAL_PROXY) {
+        return Err("Системный proxy не включился. Проверьте Параметры Windows → Сеть и Интернет → Прокси и повторите.".into());
+    }
     for c in &snapshot.changes {
         let expected = if c.managed { &c.applied } else { &c.before };
         if !same_indicator(&c.name, &windows::get(&c.name)?, expected) { return Err(format!("{} изменился при включении WinINet", c.name)); }
@@ -629,6 +699,7 @@ fn apply_snapshot(snapshot: &ProxySnapshot, fail_after: Option<usize>, watchdog:
     windows::notify()?;
     check_watchdog(watchdog)
 }
+
 fn snapshot_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| format!("Не удалось создать папку настроек: {e}"))?;
@@ -1293,6 +1364,62 @@ async fn test_proxy_latency() -> Result<Option<u32>, String> {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(8)).proxy(reqwest::Proxy::all(format!("http://{LOCAL_PROXY}")).map_err(|e| e.to_string())?).build().map_err(|e| e.to_string())?;
     match client.get("https://www.gstatic.com/generate_204").send().await { Ok(r) if r.status().is_success() => Ok(Some(started.elapsed().as_millis().min(u32::MAX as u128) as u32)), _ => Ok(None) }
 }
+// Diagnostics leave the machine only when the user copies them. Mask UUIDs,
+// credentials, REALITY keys, subscription URLs and remote host names first.
+fn redact_diagnostics(input: &str) -> String {
+    use regex::{Captures, Regex};
+    let mut text = input.to_string();
+    let rules: &[(&str, &str)] = &[
+        (r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "***"),
+        (r#"(?i)\b(?:vless|vmess|trojan|ss|hysteria2)://[^\s"'<>]+"#, "***"),
+        (r#"(?i)\b(pbk|sid|password|passwd|uuid|token|secret|publickey|shortid)(\s*["']?\s*[:=]\s*["']?)([^\s"',;&}]+)"#, "$1$2***"),
+        (r#"(?i)("(?:server|address|host)"\s*:\s*")[^"]+"#, "${1}***"),
+        (r#"(?i)https?://[^\s"'<>]+"#, "https://***"),
+        (r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}:\d{1,5}\b", "***"),
+    ];
+    for (pattern, replacement) in rules {
+        if let Ok(regex) = Regex::new(pattern) { text = regex.replace_all(&text, *replacement).into_owned(); }
+    }
+    if let Ok(ip) = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b") {
+        text = ip.replace_all(&text, |caps: &Captures| {
+            let value = &caps[0];
+            let octets: Vec<u32> = value.split('.').filter_map(|part| part.parse().ok()).collect();
+            let private = octets.len() == 4 && (octets[0] == 127 || octets[0] == 10 || octets[0] == 0
+                || (octets[0] == 192 && octets[1] == 168) || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 169 && octets[1] == 254) || (octets[0] == 100 && (64..=127).contains(&octets[1])));
+            if private { value.to_string() } else { "***".to_string() }
+        }).into_owned();
+    }
+    text
+}
+fn core_version() -> String {
+    let Ok(path) = xray_path() else { return "неизвестно".into() };
+    for argument in ["version", "-version"] {
+        if let Ok(output) = std::process::Command::new(&path).arg(argument).output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = text.lines().find(|line| !line.trim().is_empty()) { return line.trim().to_string(); }
+        }
+    }
+    "неизвестно".into()
+}
+#[tauri::command]
+fn proxy_diagnostics() -> Result<String, String> {
+    let warning = PROXY_WARNING.lock().ok().and_then(|guard| guard.clone()).unwrap_or_else(|| "нет".into());
+    let core = core_version();
+    Ok(format!("КартошкаVPN {}\nЯдро: {}\ncore={}\n\nНастройки proxy Windows:\n{}\n\nПредупреждение: {}", env!("CARGO_PKG_VERSION"), core, core, proxy_dump(), warning))
+}
+#[tauri::command]
+fn collect_diagnostics(app: AppHandle) -> Result<String, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let app_log = fs::read_to_string(dir.join("kartoshka.log")).unwrap_or_default();
+    let app_log = if app_log.len() > 200_000 { app_log[app_log.len() - 200_000..].to_string() } else { app_log };
+    let core = fs::read_to_string(dir.join("core.log")).unwrap_or_default();
+    let core_tail: Vec<&str> = core.lines().rev().take(300).collect();
+    let mut text = format!("КартошкаVPN {}\nЯдро: {}\n\n=== app.log (kartoshka.log) ===\n{}\n=== core.log (последние 300 строк) ===\n{}\n=== Настройки proxy Windows ===\n{}\n",
+        env!("CARGO_PKG_VERSION"), core_version(), app_log, core_tail.into_iter().rev().collect::<Vec<_>>().join("\n"), proxy_dump());
+    if let Ok(warning) = PROXY_WARNING.lock() { if let Some(value) = warning.as_ref() { text.push_str(&format!("=== Предупреждение ===\n{value}\n")); } }
+    Ok(redact_diagnostics(&text))
+}
 #[tauri::command]
 fn read_logs(app: AppHandle) -> Result<String, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
@@ -1309,7 +1436,8 @@ fn read_logs(app: AppHandle) -> Result<String, String> {
     Ok(text)
 }
 #[tauri::command]
-async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: String, debug: Option<bool>) -> Result<(), String> {
+async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: String, debug: Option<bool>) -> Result<Option<String>, String> {
+    if let Ok(mut guard) = PROXY_WARNING.lock() { *guard = None; }
     let path = snapshot_path(&app)?;
     let binary = xray_path()?;
     let assets = app.path().resource_dir().map_err(|e| format!("Не найдены ресурсы Xray: {e}"))?.join("xray-assets");
@@ -1335,12 +1463,18 @@ async fn start_proxy(app: AppHandle, state: State<'_, ProxyState>, config_json: 
         let generation = guard.child.as_ref().map(|_| guard.generation);
         Ok::<_, String>((result, generation))
     }).await.map_err(|e| e.to_string())??;
-    if result.is_ok() { append_log(&app, "Xray и watchdog запущены; обход WinINet: <local>, 127.0.0.1, [::1]."); }
+    match &result {
+        Ok(_) => append_log(&app, "Xray и watchdog запущены; обход WinINet: <local>, 127.0.0.1, [::1]."),
+        Err(error) => append_log(&app, &format!("Ошибка включения proxy: {error}; {}", last_proxy_dump())),
+    }
+    if result.is_ok() {
+        if let Some(warning) = PROXY_WARNING.lock().ok().and_then(|guard| guard.clone()) { append_log(&app, &format!("Предупреждение proxy: {warning}; {}", last_proxy_dump())); }
+    }
     if let Some(generation) = generation {
         spawn_monitor(app.clone(), state.0.clone(), generation);
         spawn_health(app.clone(), state.0.clone(), generation);
     }
-    result.map(|_| ())
+    result.map(|_| take_proxy_warning())
 }
 #[tauri::command]
 async fn stop_proxy(app: AppHandle, state: State<'_, ProxyState>) -> Result<(), String> {
@@ -1475,7 +1609,7 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let _instance = match windows::one_instance() { Ok(v) => v, Err(e) => { windows::show_error(&e); return; } };
-    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![open_external, set_autostart, autostart_enabled, set_close_to_tray, set_tray_active, quit_app, load_secure_state, save_secure_state, reset_secure_state, fetch_subscription, resolve_host, dns_check, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
+    tauri::Builder::default().manage(ProxyState(Arc::new(Mutex::new(ProxyRuntime { child: None, watchdog: None, snapshot_path: None, ports: Vec::new(), generation: 0, config: None })))).invoke_handler(tauri::generate_handler![open_external, set_autostart, autostart_enabled, set_close_to_tray, set_tray_active, quit_app, load_secure_state, save_secure_state, reset_secure_state, fetch_subscription, resolve_host, dns_check, pin_peer_certificate, test_latency, test_proxy_latency, probe_internet, read_logs, proxy_diagnostics, collect_diagnostics, lookup_countries, probe_node_latency, start_proxy, stop_proxy]).setup(|app| {
         let handle = app.handle();
         match snapshot_path(handle).and_then(|path| {
             if path.exists() { restore_snapshot(&path).map(|_| true) }
@@ -1552,6 +1686,34 @@ fn main() {
     });
 }
 
+#[cfg(test)]
+mod proxy_policy_tests {
+    use super::*;
+    #[test]
+    fn pac_verdict_follows_registry_state_not_the_stale_ui_bit() {
+        assert_eq!(pac_verdict(0, None, false), PacVerdict::Clear);
+        assert_eq!(pac_verdict(3, None, false), PacVerdict::Clear);
+        assert_eq!(pac_verdict(9, None, false), PacVerdict::WarnAutoDetect);
+        assert_eq!(pac_verdict(8, None, false), PacVerdict::WarnAutoDetect);
+        assert_eq!(pac_verdict(5, None, false), PacVerdict::WarnPacBit);
+        assert_eq!(pac_verdict(4, None, false), PacVerdict::WarnPacBit);
+        assert_eq!(pac_verdict(0, Some("http://wpad/proxy.pac"), false), PacVerdict::BlockUrl);
+        assert_eq!(pac_verdict(12, Some("http://wpad/proxy.pac"), true), PacVerdict::BlockUrl);
+        assert_eq!(pac_verdict(9, None, true), PacVerdict::BlockAutoDetect);
+        assert_eq!(pac_verdict(0, Some("   "), false), PacVerdict::Clear);
+    }
+    #[test]
+    fn diagnostics_hide_secrets_and_remote_hosts() {
+        let raw = r#"vless://11111111-2222-3333-4444-555555555555@nl.example.com:443?type=tcp&security=reality&pbk=abcdef012345&sid=deadbeef#NL
+subscription https://sub.example.net/secret-token
+ProxyServer=127.0.0.1:2080; remote=203.0.113.10:443"#;
+        let redacted = redact_diagnostics(raw);
+        for secret in ["11111111-2222", "nl.example.com", "abcdef012345", "deadbeef", "sub.example.net", "secret-token", "203.0.113.10"] {
+            assert!(!redacted.contains(secret), "not masked: {secret} in {redacted}");
+        }
+        assert!(redacted.contains("127.0.0.1:2080"), "local proxy must stay readable");
+    }
+}
 #[cfg(test)]
 mod perf_tests {
     use super::*;

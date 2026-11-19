@@ -76,6 +76,9 @@ const state = {
   collapsed: [],
   latencyHistory: [],
   diagnostics: '',
+  proxyDiagnostics: '',
+  proxyWarning: '',
+  coreVersion: '',
   message: { key: capabilities.native ? 'state.checkingProxy' : 'state.previewNoConnect' }
 };
 // Effective values: stored settings stay untouched until the user flips a switch,
@@ -653,6 +656,7 @@ function settingsMarkup() {
       <div class="setting"><div><strong>${escapeHtml(t('settings.perf.preferIPv4'))}</strong><small>${escapeHtml(t('settings.perf.preferIPv4Hint'))}</small></div><label class="switch"><input type="checkbox" id="perf-ipv4" ${state.settings?.perf?.preferIPv4 ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('home.fastReconnect'))}</strong><small>${escapeHtml(t('home.fastReconnectHint'))}</small><small class="muted">${escapeHtml(t('home.fastReconnectInfo'))}</small></div><label class="switch"><input type="checkbox" id="settings-fast-reconnect" data-toggle="fast-reconnect" aria-label="${escapeHtml(t('home.fastReconnect'))}" ${state.settings?.fastReconnect ? 'checked' : ''}/><span></span></label></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.debug'))}</strong><small>${escapeHtml(t('settings.debugHint'))}</small></div><label class="switch"><input type="checkbox" id="debug-mode" ${state.settings?.debug ? 'checked' : ''}/><span></span></label></div>
+      <div class="setting"><div><strong>${escapeHtml(t('settings.xhttpQuery'))}</strong><small>${escapeHtml(t('settings.xhttpQueryHint'))}</small></div><label class="switch"><input type="checkbox" id="xhttp-query" ${state.settings?.xhttpQueryParams !== false ? 'checked' : ''}/><span></span></label></div>
     </div>
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.data'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.storage'))}</strong><small>${escapeHtml(t('settings.storageHint', { count: state.servers.length, subs: state.subscriptions.length }))}</small></div><button class="button small danger" data-action="clear-data">${icon('trash', 14)}${escapeHtml(t('settings.clearData'))}</button></div>
@@ -688,8 +692,10 @@ function statsMarkup() {
 
 function logsMarkup() {
   return `<section class="page"><div class="panel">
-    <div class="panel-head"><span>${escapeHtml(t('logs.title'))}</span><div class="head-actions"><label class="inline-check"><input type="checkbox" id="debug-mode" ${state.settings?.debug ? 'checked' : ''}/>${escapeHtml(t('logs.debug'))}</label><button class="button small" data-action="copy-logs">${icon('copy', 14)}${escapeHtml(t('logs.copy'))}</button><button class="button small" data-action="refresh-logs">${icon('refresh', 14)}${escapeHtml(t('logs.refresh'))}</button></div></div>
+    <div class="panel-head"><span>${escapeHtml(t('logs.title'))}</span><div class="head-actions"><label class="inline-check"><input type="checkbox" id="debug-mode" ${state.settings?.debug ? 'checked' : ''}/>${escapeHtml(t('logs.debug'))}</label><button class="button small" data-action="copy-logs">${icon('copy', 14)}${escapeHtml(t('logs.copy'))}</button><button class="button small" data-action="copy-diagnostics">${icon('copy', 14)}${escapeHtml(t('logs.copyDiagnostics'))}</button><button class="button small" data-action="refresh-logs">${icon('refresh', 14)}${escapeHtml(t('logs.refresh'))}</button></div></div>
     <p class="muted small">${escapeHtml(t('logs.debugHint'))}</p>
+    ${state.proxyWarning ? `<p class="warn-text">${escapeHtml(t('logs.proxyWarningLine', { text: state.proxyWarning }))}</p>` : ''}
+    <details class="diagnostics"><summary>${escapeHtml(t('logs.diagnostics'))}</summary><pre class="log-view small-log">${escapeHtml(state.proxyDiagnostics || t('logs.diagnosticsHint'))}</pre></details>
     <pre class="log-view">${escapeHtml(state.logs.join('\n') || t('logs.empty'))}</pre>
   </div></section>`;
 }
@@ -742,7 +748,7 @@ function bindEvents() {
   document.querySelectorAll('[data-server]').forEach((button) => button.addEventListener('click', () => selectServer(button.dataset.server)));
   document.querySelectorAll('[data-nav]').forEach((button) => button.addEventListener('click', async () => {
     state.activeNav = button.dataset.nav; render(); document.querySelector(`[data-focus-key="nav-${state.activeNav}"]`)?.focus();
-    if (state.activeNav === 'logs') { await loadLogs(); if (state.activeNav === 'logs') render(); }
+    if (state.activeNav === 'logs') { await loadLogs(); await loadProxyDiagnostics(); if (state.activeNav === 'logs') render(); }
   }));
   document.querySelectorAll('[data-group]').forEach((button) => button.addEventListener('click', () => {
     const key = button.dataset.group;
@@ -814,6 +820,9 @@ function bindEvents() {
   document.querySelector('#dns-mode')?.addEventListener('change', (event) => {
     if (dnsModeIds.includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), dns: event.target.value } }); render(); }
   });
+  document.querySelector('#xhttp-query')?.addEventListener('change', (event) => {
+    commitData({ settings: { ...(state.settings || {}), xhttpQueryParams: Boolean(event.target.checked) } }); render();
+  });
   document.querySelector('#failover-mode')?.addEventListener('change', (event) => {
     if (['country', 'any', 'never'].includes(event.target.value)) { commitData({ settings: { ...(state.settings || {}), failover: event.target.value } }); render(); }
   });
@@ -857,7 +866,15 @@ function bindEvents() {
     state.notice = { text: debug ? t('notice.debugOn') : t('notice.debugOff') };
     render();
   }));
-  document.querySelector('[data-action="refresh-logs"]')?.addEventListener('click', async () => { await loadLogs(); render(); });
+  document.querySelector('[data-action="refresh-logs"]')?.addEventListener('click', async () => { await loadLogs(); await loadProxyDiagnostics(); render(); });
+  document.querySelector('[data-action="copy-diagnostics"]')?.addEventListener('click', async () => {
+    try {
+      const text = await desktopBridge.collectDiagnosticsFile();
+      await navigator.clipboard.writeText(text || '');
+      state.notice = { text: t('logs.copyDiagnosticsDone') };
+    } catch { state.notice = { type: 'error', text: t('logs.copyDiagnosticsFailed') }; }
+    render();
+  });
   document.querySelector('[data-action="copy-logs"]')?.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(state.logs.join('\n')); state.notice = { text: t('logs.copied') }; } catch { state.notice = { type: 'error', text: t('logs.copyFailed') }; }
     render();
@@ -1211,6 +1228,21 @@ async function loadLogs() {
   try { const text = await desktopBridge.readLogs(); state.logs = text ? text.trim().split('\n').slice(-300) : []; }
   catch (error) { state.logs = [t('logs.failed', { error: errorText(error) })]; }
 }
+async function loadProxyDiagnostics() {
+  try { state.proxyDiagnostics = await desktopBridge.proxyDiagnostics() || ''; }
+  catch (error) { state.proxyDiagnostics = t('logs.diagnosticsFailed', { error: errorText(error) }); }
+}
+async function logXhttpSummary(config) {
+  const outbound = config?.outbounds?.find((item) => item?.streamSettings?.xhttpSettings);
+  if (!outbound) return;
+  try {
+    const diagnostics = await desktopBridge.proxyDiagnostics();
+    const match = String(diagnostics || '').match(/^core=(.+)$/m);
+    if (match) state.coreVersion = match[1].trim();
+  } catch { /* версия необязательна */ }
+  const xhttp = outbound.streamSettings.xhttpSettings;
+  appendLocalLog(t('logs.xhttpLine', { path: xhttp.path || '/', mode: xhttp.mode || 'auto', host: xhttp.host || '—', keys: Object.keys(xhttp.extra || {}).join(',') || '—', core: state.coreVersion || '—' }));
+}
 
 // ---------------------------------------------------------------------------
 // Connection
@@ -1311,6 +1343,7 @@ async function startSelected(node) {
     state.connection = 'error'; setMessage('state.connectUnavailable'); render(); return;
   }
   const route = state.routeMode;
+  state.proxyWarning = '';
   const operation = ++operationSequence;
   const exitsAtStart = exitSequence;
   state.connection = 'connecting'; state.diagnostics = ''; setMessage('state.startingXray', { name: node.name || t('servers.serverFallback') }); state.cleanupNeeded = false; render();
@@ -1320,9 +1353,15 @@ async function startSelected(node) {
     const snapshotNode = await protectNodeAddress(copyNode(node));
     const poolRaw = autoPool(snapshotNode);
     const pool = poolRaw.length > 1 ? await Promise.all(poolRaw.map(protectNodeAddress)) : poolRaw;
-    const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: dnsProtectionOn() ? 'builtin' : 'system', perf: { ...(state.settings?.perf || {}), tcpFastOpen: fastReconnectOn() }, auto: pool.length > 1 ? pool : undefined });
+    const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: dnsProtectionOn() ? 'builtin' : 'system', perf: { ...(state.settings?.perf || {}), tcpFastOpen: fastReconnectOn() }, auto: pool.length > 1 ? pool : undefined, xhttpQuery: state.settings?.xhttpQueryParams !== false });
     const result = await desktopBridge.connect({ config, debug: Boolean(state.settings?.debug) });
     if (result?.ok === false) throw Object.assign(new Error('proxyLaunchFailed'), { code: 'proxyLaunchFailed', params: { error: errorText(result.error) } });
+    if (result?.warning) {
+      state.proxyWarning = result.warning;
+      state.notice = { type: 'error', text: result.warning };
+      appendLocalLog(t('logs.proxyWarningLine', { text: result.warning }));
+    }
+    logXhttpSummary(config);
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringConnect'), { code: 'xrayExitedDuringConnect' });
     setMessage('state.checkingInternet'); render();
     const ip = await desktopBridge.probeInternet();

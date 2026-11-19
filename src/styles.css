@@ -353,6 +353,10 @@ select:disabled { opacity: 0.5; }
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg);
   color: var(--muted-strong); font: 11.5px/1.55 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-word;
 }
+.diagnostics { margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; }
+.diagnostics summary { cursor: pointer; color: var(--muted-strong); font-size: 12px; }
+.diagnostics .small-log { max-height: 32vh; }
+
 .inline-check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-strong); font-size: 12px; }
 .inline-check input { accent-color: var(--accent); }
 .about { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }

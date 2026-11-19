@@ -354,6 +354,21 @@ test('XHTTP: те же ключи на ws и grpc остаются предуп�
     assert.ok(result.warnings.some((w) => w.key === 'sub.unknownParam'), 'ожидалось предупреждение sub.unknownParam');
   }
 });
+const xhttpMixed = `vless://${id}@example.test:443?type=xhttp&security=tls&sni=example.test&path=%2Fm&x_padding_bytes=100-1000&no_grpc_header=true&xmux=%7B%22maxConnections%22%3A1%7D&extra=${encodeURIComponent(JSON.stringify({ xPaddingBytes: 2048, xPaddingKey: 'x-fixture' }))}#Mixed`;
+test('XHTTP: выключенная настройка использует только extra=JSON', () => {
+  const node = parseOne(xhttpMixed);
+  const extra = buildXrayConfig([node], node.id, 'all', null, { xhttpQuery: false }).outbounds[0].streamSettings.xhttpSettings.extra;
+  assert.equal(extra.xPaddingBytes, 2048, 'extra=JSON wins');
+  assert.equal(extra.xPaddingKey, 'x-fixture');
+  assert.equal(extra.noGRPCHeader, undefined, 'query-only key must be dropped');
+  assert.equal(extra.xmux, undefined, 'query-only JSON key must be dropped too');
+});
+test('XHTTP: без extra=JSON выключенная настройка не добавляет extra', () => {
+  const node = parseOne(xhttpQuery);
+  const settings = buildXrayConfig([node], node.id, 'all', null, { xhttpQuery: false }).outbounds[0].streamSettings.xhttpSettings;
+  assert.equal(settings.extra, undefined);
+  assert.equal(settings.mode, 'auto');
+});
 const hy2Tuned = `hy2://fixture-auth@example.test:443?sni=example.test&obfs=salamander&obfs-password=fixture-mask&up=50%20mbps&down=200%20mbps&congestion=bbr#HY2Tuned`;
 test('Hysteria2: up, down и congestion переносятся, без них полей нет', () => {
   const tuned = parseSubscriptionDetailed(hy2Tuned);
@@ -375,6 +390,13 @@ test('xray run -test принимает XHTTP из query и Hysteria2 с пол�
       writeFileSync(path, JSON.stringify(config(link)), { mode: 0o600 });
       const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
       assert.equal(result.status, 0, `ядро отклонило конфигурацию ${index}: ${result.stderr} ${result.stdout}`);
+    }
+    for (const [name, options] of [['xhttp-query-on', {}], ['xhttp-query-off', { xhttpQuery: false }]]) {
+      const node = parseOne(xhttpMixed);
+      const path = join(dir, `${name}.json`);
+      writeFileSync(path, JSON.stringify(buildXrayConfig([node], node.id, 'all', null, options)), { mode: 0o600 });
+      const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `ядро отклонило ${name}: ${result.stderr} ${result.stdout}`);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

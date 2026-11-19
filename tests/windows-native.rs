@@ -194,6 +194,38 @@ fn windows_overrides_pac_and_restores_it() {
     println!("PASS pac: connected over the PAC baseline and restored it exactly");
 }
 #[test]
+fn windows_auto_detect_without_pac_connects_and_warns() {
+    if !disposable_ci() { return; }
+    let _instance = windows::one_instance().expect("another app/test holds the proxy lock");
+    let _guard = RegistryGuard::capture();
+    let env = NativeEnv::new();
+    baseline(0);
+    windows::set("AutoDetect", &dword(1)).unwrap();
+    windows::set("ProxyEnable", &dword(0)).unwrap();
+    windows::set_flags(1 | 8).unwrap();
+    windows::notify().unwrap();
+    let observed = windows::flags().unwrap();
+    if observed & 8 == 0 {
+        // Windows Server 2025 drops the legacy AutoDetect DWORD; the state matrix
+        // is still covered by pac_verdict tests and the PAC end-to-end case.
+        println!("SKIP auto-detect: this Windows image does not keep the bit (flags={observed})");
+        return;
+    }
+    let original = saved();
+    if let Ok(mut guard) = PROXY_WARNING.lock() { *guard = None; }
+    let mut runtime = empty_runtime();
+    start_runtime(&mut runtime, &env.binary, &env.assets, &env.path, &env.config, None)
+        .expect("auto-detect without a PAC URL must not block the start");
+    assert!(windows::flags().unwrap() & 2 != 0, "local proxy must be on");
+    assert_eq!(windows::get("AutoConfigURL").unwrap(), None, "there is no PAC URL to keep");
+    let warning = PROXY_WARNING.lock().ok().and_then(|guard| guard.clone()).unwrap_or_default();
+    assert!(warning.contains("автоопределение"), "a residual auto-detect bit must be reported: {warning}");
+    stop_runtime(&mut runtime).expect("restore after auto-detect");
+    assert_saved(&original, "the auto-detect baseline must come back");
+    assert!(!env.path.exists(), "snapshot must be removed after restore");
+    println!("PASS auto-detect without PAC (flags={observed}) connected with a warning and restored");
+}
+#[test]
 fn windows_xray_real_registry_transaction_and_rollback() {
     if !disposable_ci() { return; }
     let _instance = windows::one_instance().expect("another app/test holds the proxy lock");

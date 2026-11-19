@@ -44,6 +44,7 @@ pub fn providers() -> &'static [Provider] {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn provider_by_id(id: &str) -> Option<&'static Provider> {
     providers().iter().find(|provider| provider.id == id)
 }

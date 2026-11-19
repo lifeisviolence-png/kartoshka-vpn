@@ -56,20 +56,28 @@ function normalizeExtra(extra) {
   }
   return extra;
 }
-function streamFor(outbound) {
+function streamFor(outbound, options = {}) {
   const t = outbound.transport;
   if (t !== undefined && t !== null && !object(t)) failCode('config.transport');
   const type = t?.type || 'tcp';
   if (type === 'http' || type === 'h2') failCode('config.legacyTransport');
   if (!['tcp', 'raw', 'ws', 'websocket', 'grpc', 'xhttp', 'httpupgrade'].includes(type)) failCode('config.transport');
-  const keysByType = { tcp:['type'], raw:['type'], ws:['type','path','headers'], websocket:['type','path','headers'], grpc:['type','service_name','authority','multi_mode'], xhttp:['type','host','path','mode','extra'], httpupgrade:['type','host','path'] };
+  const keysByType = { tcp:['type'], raw:['type'], ws:['type','path','headers'], websocket:['type','path','headers'], grpc:['type','service_name','authority','multi_mode'], xhttp:['type','host','path','mode','extra','extraFromQuery','extraJson'], httpupgrade:['type','host','path'] };
   if (t && Object.keys(t).some(key => !keysByType[type].includes(key))) failCode('config.transportParams');
   const network = ({ tcp: 'raw', raw: 'raw', ws: 'ws', websocket: 'ws', grpc: 'grpc', xhttp: 'xhttp', httpupgrade: 'httpupgrade' })[type];
   const stream = { network };
   if (network === 'xhttp') {
     // 3x-ui, Marzban and Happ put the XHTTP mode inside `extra`, while Xray
     // expects it next to host/path. Lift it out instead of rejecting the node.
-    const extra = t.extra === undefined ? undefined : normalizeExtra({ ...t.extra });
+    // The XHTTP setting can fall back to the 0.9.2 contract: only extra=JSON.
+    let extra;
+    if (options.xhttpQuery === false) {
+      extra = t.extraJson !== undefined ? normalizeExtra({ ...t.extraJson })
+        : t.extra === undefined ? undefined : Object.fromEntries(Object.entries(t.extra).filter(([key]) => !(key in (t.extraFromQuery || {}))));
+      if (extra) normalizeExtra(extra);
+    } else {
+      extra = t.extra === undefined ? undefined : normalizeExtra({ ...t.extra });
+    }
     const extraMode = extra && extra.mode !== undefined ? String(extra.mode) : undefined;
     if (extra) delete extra.mode;
     const mode = t.mode !== undefined ? t.mode : extraMode;
@@ -125,7 +133,7 @@ function streamFor(outbound) {
 }
 
 // Also used at import time, so malformed links do not become apparently usable nodes.
-export function toXrayOutbound(node) {
+export function toXrayOutbound(node, options = {}) {
   if (!object(node) || !object(node.outbound)) failCode('config.noOutbound');
   if (node.unsupported || node.supported === false) failCode(node.code || 'config.unsupportedNode', { name: node.name });
   const o = node.outbound;
@@ -159,7 +167,7 @@ export function toXrayOutbound(node) {
   let stream;
   if (protocol === 'hysteria2') {
     if (o.transport) failCode('config.hy2Transport');
-    stream = streamFor({ ...o, transport: undefined });
+    stream = streamFor({ ...o, transport: undefined }, options);
     if (stream.security !== 'tls') failCode('config.hy2Tls');
     stream.network = 'hysteria';
     stream.hysteriaSettings = { version: 2, auth: typeof o.password === 'string' ? o.password : '' };
@@ -171,7 +179,7 @@ export function toXrayOutbound(node) {
       if (o.obfs.type !== 'salamander' || !o.obfs.password) failCode('config.hy2Obfs');
       stream.finalmask = { udp: [{ type: 'salamander', settings: { password: o.obfs.password } }] };
     }
-  } else stream = streamFor(o);
+  } else stream = streamFor(o, options);
   if (protocol === 'vless' && o.flow && (stream.network !== 'raw' || !['tls', 'reality'].includes(stream.security))) failCode('config.visionTransport');
   const result = { tag: 'proxy', protocol: protocol === 'hysteria2' ? 'hysteria' : protocol, settings, streamSettings: stream };
   if (o.packet_encoding === 'xudp') result.mux = { enabled: true, concurrency: -1, xudpConcurrency: 8 };
@@ -258,8 +266,8 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
   const pool = Array.isArray(options.auto) ? options.auto.filter((item) => item && item.id && !item.unsupported).slice(0, 8) : [];
   const balanced = pool.length > 1;
   const outbounds = balanced
-    ? pool.map((item, index) => ({ ...toXrayOutbound(item), tag: `proxy-${index + 1}` }))
-    : [toXrayOutbound(selected)];
+    ? pool.map((item, index) => ({ ...toXrayOutbound(item, options), tag: `proxy-${index + 1}` }))
+    : [toXrayOutbound(selected, options)];
   if (Object.keys(sockopt).length) {
     for (const outbound of outbounds) {
       if (outbound.tag === 'direct' || outbound.tag === 'block') continue;
