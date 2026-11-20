@@ -30,6 +30,7 @@ PID_8080=""
 PID_8081=""
 cleanup() {
   timeout 30 adb logcat -d -s KPV_PHASE0:* >"$LOGCAT" 2>&1 || true
+  timeout 60 adb logcat -d > /tmp/kpv-full-logcat.txt 2>&1 || true
   timeout 30 adb shell ip addr >"$NETWORK" 2>&1 || true
   timeout 30 adb shell ip route >>"$NETWORK" 2>&1 || true
   timeout 30 adb shell run-as "$PKG" cat files/access.log >"$ACCESS" 2>&1 || true
@@ -80,7 +81,15 @@ adb push scripts/android-phase0-http-client.sh "$CLIENT" >/dev/null
 adb shell chmod 755 "$CLIENT"
 
 timeout 30 adb logcat -c
-timeout 300 adb shell am start -W -n "$ACTIVITY" || true
+# Do not use `am start -W`: on TCG it times out while the Tauri WebView is
+# still loading, and the timeout is not evidence that the app failed. Start
+# the Activity normally, then start the service explicitly so the TUN proof
+# does not depend on the UI's startup timing.
+timeout 60 adb shell am start -n "$ACTIVITY" || true
+sleep 10
+timeout 60 adb shell am start-foreground-service \
+  -n "$PKG/com.plugin.vpn.KartoshkaVpnService" \
+  -a com.plugin.vpn.action.START || true
 
 # TCG is slow. Wait for the service log instead of guessing a fixed delay.
 for _ in $(seq 1 90); do
@@ -95,8 +104,6 @@ timeout 30 adb logcat -d -s KPV_PHASE0:* | tail -120
 timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'xray version:'
 timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'tunnel started fd='
 timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'xray state: true'
-timeout 60 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'
-timeout 30 adb shell ps -A | grep -q "$PKG"
 
 echo '--- network state ---'
 timeout 30 adb shell ip addr || true
@@ -129,6 +136,13 @@ if grep -q 'GET /' "$LOG_8080"; then
 fi
 test -s "$RESPONSE"
 grep -q 'Directory listing' "$RESPONSE"
+
+echo '--- service checks ---'
+if ! timeout 60 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'; then
+  echo 'ERROR: KartoshkaVpnService is not running after the traffic test'
+  exit 1
+fi
+timeout 30 adb shell ps -A | grep -q "$PKG"
 
 echo '--- activity close check ---'
 timeout 30 adb shell input keyevent 3

@@ -52,7 +52,13 @@ class KartoshkaVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var coreStarted: Boolean = false
 
+    override fun onCreate() {
+        super.onCreate()
+        Log.i(TAG, "service onCreate")
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(TAG, "service onStartCommand action=${intent?.action ?: "null"}")
         when (intent?.action) {
             ACTION_START -> {
                 startForegroundNotification()
@@ -165,7 +171,7 @@ class KartoshkaVpnService : VpnService() {
             Log.i(TAG, "xray state: ${xrayRunning()}")
         } catch (error: Throwable) {
             lastError = error.message ?: error.javaClass.simpleName
-            Log.e(TAG, "tunnel start failed: $lastError")
+            Log.e(TAG, "tunnel start failed: $lastError", error)
             stopTunnel()
         }
     }
@@ -238,6 +244,7 @@ class KartoshkaVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "service onDestroy")
         stopTunnel()
         super.onDestroy()
     }

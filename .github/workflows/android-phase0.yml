@@ -141,6 +141,7 @@ jobs:
             /tmp/kpv-response.txt
             /tmp/kpv-client.err
             /tmp/kpv-logcat.txt
+            /tmp/kpv-full-logcat.txt
             /tmp/kpv-network.txt
             /tmp/kpv-xray-access.log
             /tmp/kpv-emulator.log
