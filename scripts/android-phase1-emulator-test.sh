@@ -92,7 +92,46 @@ timeout 60 adb shell am start -n "$ACTIVITY" || true
 sleep 8
 # The production service is not exported. The debug-only test activity is the
 # only way for adb to request an explicit start; it refuses to run in release.
-timeout 60 adb shell "am start -n $PKG/com.plugin.vpn.KpvTestStartActivity --es config '$CONFIG'" || true
+start_test_activity() {
+  timeout 60 adb shell "am start -n $PKG/com.plugin.vpn.KpvTestStartActivity --es config '$CONFIG'" || true
+}
+start_test_activity
+sleep 3
+# On a clean emulator the system VPN consent dialog may still be shown even
+# after `appops set ACTIVATE_VPN allow`. Confirm it and retry the explicit
+# start; on images where the appop already authorizes the package this branch
+# is not taken.
+if timeout 30 adb shell dumpsys window windows 2>/dev/null | grep -q 'com.android.vpndialogs'; then
+  echo '--- confirming system VPN consent dialog ---'
+  timeout 30 adb shell uiautomator dump /sdcard/kpv-window.xml >/dev/null 2>&1 || true
+  timeout 30 adb shell cat /sdcard/kpv-window.xml > /tmp/kpv-window.xml 2>/dev/null || true
+  TAP="$(python3 - <<'PY'
+import re
+import xml.etree.ElementTree as ET
+try:
+    root = ET.parse('/tmp/kpv-window.xml').getroot()
+except Exception:
+    raise SystemExit
+for node in root.iter('node'):
+    text = node.attrib.get('text', '')
+    rid = node.attrib.get('resource-id', '')
+    if text in ('OK', 'Allow', 'Разрешить', 'Разрешить подключение') or rid.endswith('button1'):
+        match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', node.attrib.get('bounds', ''))
+        if match:
+            x = (int(match.group(1)) + int(match.group(3))) // 2
+            y = (int(match.group(2)) + int(match.group(4))) // 2
+            print(f'{x} {y}')
+            break
+PY
+)"
+  if [ -n "$TAP" ]; then
+    timeout 30 adb shell input tap $TAP || true
+  else
+    timeout 30 adb shell input keyevent 66 || true
+  fi
+  sleep 3
+  start_test_activity
+fi
 
 for _ in $(seq 1 120); do
   if timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'tunnel started fd='; then break; fi

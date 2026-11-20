@@ -3,6 +3,7 @@ package com.plugin.vpn
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -20,6 +21,17 @@ class KpvTestStartActivity : Activity() {
         super.onCreate(savedInstanceState)
         if ((applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
             Log.w("KPV_PHASE1", "test start rejected: application is not debuggable")
+            finish()
+            return
+        }
+
+        // establish() returns null until the package is authorized. The
+        // emulator test grants ACTIVATE_VPN, but prepare() is still the
+        // documented way to make that authorization visible to VpnService.
+        val consent = VpnService.prepare(this)
+        if (consent != null) {
+            Log.i("KPV_PHASE1", "VPN consent dialog requested")
+            startActivity(consent)
             finish()
             return
         }
