@@ -44,9 +44,12 @@ KPV_PHASE0: xray: Failed to start: app/proxyman/inbound: failed to start proxy >
   и секреты.
 - `freedom.redirect` на `10.0.2.2:8081` — только маркер теста. В реальном
   клиенте outbound'ы строятся из подписки.
-- Имя TUN в конфиге не задаётся: Android сам выбирает `tun0`/аналог, а Xray
-  берёт фактическое имя из fd. Если задать `name`, Xray справедливо откажется,
-  потому что имя не совпадёт.
+- В конфиге задаётся непустое `name`-заглушка (`kpv0`). Android-сборка Xray
+  использует отдельный `AndroidTun`: значение `name` она не применяет, а
+  фактическое имя читает из fd через `TUNGETIFF`. Пустое `name` использовать
+  нельзя: generic-конфигуратор вызывает `net.Interfaces()`, а Android
+  запрещает `NETLINK_ROUTE` (`netlinkrib: permission denied`). Это и было
+  причиной падения run `44716801743`.
 
 Почему не другие UI-варианты:
 
@@ -168,6 +171,7 @@ CI также проверяет наличие `libgojni.so` и `libkartoshka_v
 | `44703589415` | запуск эмулятора | у `ubuntu-latest` нет `/dev/kvm`; emulator 37 отказался от `-accel off` без `ANDROID_I_WANT_MY_TCG=yes` |
 | `44705873986` | `adb install` | `android-emulator-runner` выполняет строки `script` по одной, переменная `APK` не сохранялась между строками |
 | `44709119808` | запуск Xray | `tunnel started fd=204`, затем `bad file descriptor`: AOSP `closeDescriptors()` закрыл fd перед `exec` |
+| `44716801743` | сборка TUN inbound | пустое `name` вызвало `net.Interfaces()`; Android запретил `NETLINK_ROUTE`: `netlinkrib: permission denied` |
 | `[новый прогон после исправления]` | — | ожидается после push ветки |
 
 После `44709119808` вариант с binary + `ProcessBuilder` признан негодным для

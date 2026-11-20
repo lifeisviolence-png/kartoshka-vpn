@@ -244,7 +244,11 @@ class KartoshkaVpnService : VpnService() {
             {
               "tag": "tun-in",
               "protocol": "tun",
-              "settings": { "mtu": 1500 }
+              // AndroidTun ignores this value and reads the real name from
+              // the fd. It must be non-empty: an empty name makes the generic
+              // config builder call net.Interfaces(), which Android denies
+              // with "netlinkrib: permission denied".
+              "settings": { "name": "kpv0", "mtu": 1500 }
             }
           ],
           "outbounds": [
