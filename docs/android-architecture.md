@@ -155,7 +155,9 @@ x86_64 API 34 (TCG, без KVM):
    и запускается в процессе приложения.
 4. `getXrayState` возвращает `true`.
 5. HTTP-запрос с эмулятора к `10.0.2.2:8080` проходит через TUN/Xray,
-   Xray перенаправляет его на `10.0.2.2:8081`, а ответ возвращается клиенту.
+   Xray перенаправляет его на `127.0.0.1:8081`, опубликованный на хосте
+   через `adb reverse`, а ответ возвращается клиенту. Это не зависит от
+   внешней сети эмулятора, которая на TCG может не подняться.
 6. Служба и состояние Xray остаются живыми после ухода Activity на Home.
 
 CI также проверяет наличие `libgojni.so` и `libkartoshka_vpn_lib.so`,
@@ -173,11 +175,53 @@ CI также проверяет наличие `libgojni.so` и `libkartoshka_v
 | `44709119808` | запуск Xray | `tunnel started fd=204`, затем `bad file descriptor`: AOSP `closeDescriptors()` закрыл fd перед `exec` |
 | `44716801743` | сборка TUN inbound | пустое `name` вызвало `net.Interfaces()`; Android запретил `NETLINK_ROUTE`: `netlinkrib: permission denied` |
 | `44721901490` | `adb install` | PackageManager ещё не был готов: `Failure calling service package: Broken pipe (32)`; добавлены ожидание `pm`, `--no-streaming` и три попытки |
-| `[новый прогон после исправления]` | — | ожидается после push ветки |
+| `44725148006` | тест трафика | HTTP-клиент образа и буферизация логов Python-серверов; добавлены отдельный клиент и `python3 -u` |
+| `44729064453` | post-boot шаг action | `android-emulator-runner` вызвал `input keyevent 82`, пока `InputManager` ещё не был готов: `Broken pipe` |
+| `44732153599` | запуск эмулятора | AVD создался не в том каталоге, который искал `emulator`; задан явный `ANDROID_AVD_HOME` |
+| `44734668107` | жизненный цикл сервиса | `am start -W` отвалился по таймауту, сервис преждевременно остановился; убран `-W`, сервис стартует явно |
+| `44739817923` | исходящее соединение Xray | у эмулятора не поднялись `eth0`/`wlan0`; `dial tcp 10.0.2.2:8081: network is unreachable` |
+| `44744072111` | проверка ответа | TUN и ответ 200 уже работали, но тест ожидал `Directory listing`, а сервер отдавал `index.html` |
+| `44748613879` | — | **успех**: TUN→Xray→`127.0.0.1:8081`, HTTP 200, сервис пережил Home |
 
 После `44709119808` вариант с binary + `ProcessBuilder` признан негодным для
 передачи fd; spike переведён на libXray AAR. Это не ослабление проверки: тест
 по-прежнему требует реального TUN→Xray→8081 и падает при обходе TUN.
+
+## Результат успешного прогона
+
+Прогон `44748613879`, HEAD `4148e19`, workflow «Android Phase 0 spike» —
+`success`.
+
+```text
+APK: 59 718 269 байт
+SHA-256: aa730ce96276e872c9081cda2077e377c0064c96ceb6b85938de8f8b2b72ea74
+package: ru.kartoshka.vpn, versionCode 9010, versionName 0.9.10
+minSdk 26, targetSdk 35, compileSdk 37
+lib/x86_64/libgojni.so: 36 433 872 байта
+lib/x86_64/libkartoshka_vpn_lib.so: 139 783 560 байт
+libxray.so: отсутствует
+```
+
+Ключевые строки logcat:
+
+```text
+KPV_PHASE0: service onCreate
+KPV_PHASE0: service onStartCommand action=com.plugin.vpn.action.START
+KPV_PHASE0: xray version: 26.10.31
+KPV_PHASE0: tunnel started fd=168
+KPV_PHASE0: xray state: true
+```
+
+Access-лог Xray подтвердил приём запроса из TUN:
+
+```text
+from tcp:10.8.0.2:46072 accepted tcp:10.0.2.2:8080 [tun-in >> test-out]
+```
+
+Сервер на 8081 получил `GET / HTTP/1.0` и ответил `200`; в логе 8080 нет
+`GET /`, только строка запуска сервера. Клиент получил `HTTP/1.0 200 OK`.
+После `input keyevent 3` (Home) проверки `dumpsys activity services` и
+`ps -A` прошли, тест завершился `PHASE0_EMULATOR_OK`.
 
 ## Риски, которые нельзя скрывать
 
