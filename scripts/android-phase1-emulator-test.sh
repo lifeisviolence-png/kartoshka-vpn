@@ -101,7 +101,15 @@ sleep 3
 # after `appops set ACTIVATE_VPN allow`. Confirm it and retry the explicit
 # start; on images where the appop already authorizes the package this branch
 # is not taken.
-if timeout 30 adb shell dumpsys window windows 2>/dev/null | grep -q 'com.android.vpndialogs'; then
+CONSENT=0
+for _ in $(seq 1 10); do
+  if timeout 30 adb shell dumpsys window windows 2>/dev/null | grep -q 'com.android.vpndialogs'; then
+    CONSENT=1
+    break
+  fi
+  sleep 1
+done
+if [ "$CONSENT" = 1 ]; then
   echo '--- confirming system VPN consent dialog ---'
   timeout 30 adb shell uiautomator dump /sdcard/kpv-window.xml >/dev/null 2>&1 || true
   timeout 30 adb shell cat /sdcard/kpv-window.xml > /tmp/kpv-window.xml 2>/dev/null || true
@@ -149,8 +157,13 @@ timeout 30 adb shell ip route || true
 timeout 30 adb shell ip -6 route || true
 timeout 30 adb shell ip addr show tun0 | grep -q '10.8.0.2'
 timeout 30 adb shell ip -6 addr show tun0 | grep -q 'fd00::2'
-timeout 30 adb shell ip route | grep -q '^default dev tun0'
-timeout 30 adb shell ip -6 route | grep -q '^default dev tun0'
+# Android installs VPN routes in a separate policy table, so the main table
+# intentionally has no default route. Check all tables and, additionally, that
+# a real lookup for an internet address selects tun0.
+timeout 30 adb shell ip route show table all | grep -qE 'default( via [^ ]+)? dev tun0'
+timeout 30 adb shell ip -6 route show table all | grep -qE 'default( via [^ ]+)? dev tun0'
+timeout 30 adb shell ip route get 1.1.1.1 | grep -q 'dev tun0'
+timeout 30 adb shell ip -6 route get 2606:4700:4700::1111 | grep -q 'dev tun0'
 
 echo '--- no listening TCP sockets owned by the app ---'
 APP_UID="$(timeout 30 adb shell dumpsys package "$PKG" | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1 | tr -d '\r')"
