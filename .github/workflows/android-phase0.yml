@@ -91,11 +91,15 @@ jobs:
           # services can still answer with "Broken pipe" and the action aborts
           # before our test script runs. Starting the emulator ourselves lets
           # us wait for PackageManager and InputManager explicitly.
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           echo no | avdmanager create avd \
             -n kpv-api34 \
             -k "system-images;android-34;google_apis;x86_64" \
             -d pixel_6 \
+            --path "$ANDROID_AVD_HOME/kpv-api34.avd" \
             --force
+          test -f "$ANDROID_AVD_HOME/kpv-api34.ini"
           emulator -avd kpv-api34 \
             -no-window -no-audio -no-boot-anim \
             -gpu swiftshader_indirect \
