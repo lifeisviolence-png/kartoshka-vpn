@@ -1,7 +1,7 @@
 import './styles.css';
 import { desktopBridge } from './desktop-bridge.js';
 import { parseSubscriptionDetailed, parseUserinfo } from './subscription.js';
-import { buildXrayConfig } from './xray-config.js';
+import { buildAndroidXrayConfig, buildXrayConfig } from './xray-config.js';
 import { t, setLanguage, getLanguage, locale, errorText as localizedError } from './i18n.js';
 import { VERSION } from './version.js';
 import { icon } from './icons.js';
@@ -20,6 +20,7 @@ const legacyKey = 'kartoshka.state.v1';
 const PING_TIMEOUT = 4000;
 const TCP_CONCURRENCY = 8;
 const UDP_CONCURRENCY = 3;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function readStored(key, fallback = null) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }
 function loadJson(key, fallback) { try { return JSON.parse(readStored(key, JSON.stringify(fallback))); } catch { return fallback; } }
@@ -82,7 +83,11 @@ const state = {
   proxyWarning: '',
   coreVersion: '',
   message: { key: capabilities.native ? 'state.checkingProxy' : 'state.previewNoConnect' },
-  clientUpdate: { status: 'idle', info: null, error: '', progress: 0 }
+  clientUpdate: { status: 'idle', info: null, error: '', progress: 0 },
+  androidApps: [],
+  androidAppsLoading: false,
+  androidAppsError: '',
+  androidAppsQuery: ''
 };
 // Effective values: stored settings stay untouched until the user flips a switch,
 // so a migration never rewrites the old settings object.
@@ -108,6 +113,7 @@ let latencyTimer = null;
 
 function persisted() { return snapshot({ ...state, nodes: state.servers }); }
 const NATIVE = capabilities.native;
+const ANDROID = capabilities.android === true;
 let persistTimer = null;
 let storageLocked = false;
 function snapshotText() { return JSON.stringify(persisted()); }
@@ -175,7 +181,10 @@ async function bootstrapSecureStorage() {
     // An empty install must not create an empty store; a fresh save would only
     // race the first real change.
     if (text || legacyKeysPresent(localStorage).length) await saveSnapshotNow();
-    scrubLegacyStorage(localStorage);
+    // Android phase 1 has no DPAPI equivalent for the whole UI snapshot; the
+    // last tunnel bundle is encrypted by the service. Keep the list in
+    // localStorage until phase 3 moves it to Android Keystore.
+    if (!ANDROID) scrubLegacyStorage(localStorage);
   } catch (error) {
     if (String(error?.message || error).includes('state.locked')) {
       storageLocked = true;
@@ -724,6 +733,7 @@ function settingsMarkup() {
       <div class="setting"><div><strong>${escapeHtml(t('settings.storage'))}</strong><small>${escapeHtml(t('settings.storageHint', { count: state.servers.length, subs: state.subscriptions.length }))}</small></div><button class="button small danger" data-action="clear-data">${icon('trash', 14)}${escapeHtml(t('settings.clearData'))}</button></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.version'))}</strong><small>${escapeHtml(t('settings.versionHint'))}</small></div><span class="mono">${escapeHtml(VERSION)}</span></div>
     </div>
+    ${ANDROID ? androidSettingsMarkup() : ''}
     ${clientUpdateMarkup()}
     <div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.automation'))}</span></div>
       <div class="setting"><div><strong>${escapeHtml(t('settings.autostart'))}</strong><small>${escapeHtml(t('settings.autostartHint'))}</small></div><label class="switch"><input type="checkbox" id="settings-autostart" ${state.settings?.autostart ? 'checked' : ''}/><span></span></label></div>
@@ -735,6 +745,31 @@ function settingsMarkup() {
       <div class="setting"><div><strong>${escapeHtml(t('settings.failover'))}</strong></div><select id="failover-mode" aria-label="${escapeHtml(t('settings.failover'))}">${['country', 'any', 'never'].map((id) => `<option value="${id}" ${id === (state.settings?.failover || 'country') ? 'selected' : ''}>${escapeHtml(t(`settings.failoverMode.${id}`))}</option>`).join('')}</select></div>
     </div>
   </section>`;
+}
+
+function androidSettingsMarkup() {
+  const split = ['include', 'exclude'].includes(state.settings?.androidSplit) ? state.settings.androidSplit : 'off';
+  const selected = new Set(Array.isArray(state.settings?.androidPackages) ? state.settings.androidPackages : []);
+  const query = String(state.androidAppsQuery || '').trim().toLowerCase();
+  const apps = state.androidApps
+    .filter((app) => !query || `${app.label || ''} ${app.package || ''}`.toLowerCase().includes(query))
+    .slice(0, 300);
+  const appRows = apps.map((app) => {
+    const checked = selected.has(app.package);
+    const icon = app.icon
+      ? `<img class="android-app-icon" src="data:image/png;base64,${escapeHtml(app.icon)}" alt=""/>`
+      : `<span class="android-app-icon placeholder">${escapeHtml((app.label || '?').slice(0, 1).toUpperCase())}</span>`;
+    return `<label class="android-app-row">${icon}<span class="android-app-name"><strong>${escapeHtml(app.label || app.package)}</strong><small>${escapeHtml(app.package)}</small></span><input type="checkbox" data-android-app="${escapeHtml(app.package)}" ${checked ? 'checked' : ''}/></label>`;
+  }).join('');
+  return `<div class="panel"><div class="panel-head"><span>${escapeHtml(t('settings.android.title'))}</span></div>
+    <p class="muted small">${escapeHtml(t('settings.android.hint'))}</p>
+    <div class="setting"><div><strong>${escapeHtml(t('settings.android.split'))}</strong><small>${escapeHtml(t('settings.android.splitHint'))}</small></div><select id="android-split" aria-label="${escapeHtml(t('settings.android.split'))}"><option value="off" ${split === 'off' ? 'selected' : ''}>${escapeHtml(t('settings.android.splitOff'))}</option><option value="include" ${split === 'include' ? 'selected' : ''}>${escapeHtml(t('settings.android.splitInclude'))}</option><option value="exclude" ${split === 'exclude' ? 'selected' : ''}>${escapeHtml(t('settings.android.splitExclude'))}</option></select></div>
+    <div class="setting"><div><strong>${escapeHtml(t('settings.android.localNetwork'))}</strong><small>${escapeHtml(t('settings.android.localNetworkHint'))}</small></div><label class="switch"><input type="checkbox" id="android-local-network" ${state.settings?.androidLocalNetwork ? 'checked' : ''} ${split === 'off' ? 'disabled' : ''}/><span></span></label></div>
+    ${split === 'off' ? '' : `<div class="setting"><div><strong>${escapeHtml(t('settings.android.apps'))}</strong><small>${escapeHtml(t('settings.android.appsHint'))}</small></div><button class="button small" data-action="android-apps-refresh" ${state.androidAppsLoading ? 'disabled' : ''}>${icon('refresh', 14)}${escapeHtml(t('settings.android.appsRefresh'))}</button></div>
+      <div class="android-app-tools"><input id="android-app-search" class="text-input" type="search" placeholder="${escapeHtml(t('settings.android.appsSearch'))}" value="${escapeHtml(state.androidAppsQuery || '')}"/></div>
+      ${state.androidAppsLoading ? `<p class="muted small">${escapeHtml(t('settings.android.appsLoading'))}</p>` : state.androidAppsError ? `<p class="warn-text">${escapeHtml(t('settings.android.appsError', { error: state.androidAppsError }))}</p>` : apps.length ? `<div class="android-app-list">${appRows}</div>` : `<p class="muted small">${escapeHtml(t('settings.android.appsEmpty'))}</p>`}`}
+    <div class="setting"><div><strong>${escapeHtml(t('settings.android.notifications'))}</strong><small>${escapeHtml(t('settings.android.notificationsHint'))}</small></div><button class="button small" data-action="android-notifications">${escapeHtml(t('settings.android.notificationsButton'))}</button></div>
+  </div>`;
 }
 
 function statsMarkup() {
@@ -808,12 +843,58 @@ function deleteMarkup() {
   return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-title"><div class="modal-head"><div><h2 id="delete-title">${escapeHtml(t('servers.deleteSubTitle'))}</h2></div><button class="icon-button" data-action="close-delete" aria-label="${escapeHtml(t('app.close'))}">${icon('close', 16)}</button></div><p>${escapeHtml(t('servers.deleteSubBody', { name: item.name, count }))}</p><div class="modal-actions"><button class="button" data-action="close-delete">${escapeHtml(t('app.cancel'))}</button><button class="button danger" data-action="confirm-delete-sub">${icon('trash', 14)}${escapeHtml(t('servers.deleteSubConfirm'))}</button></div></section></div>`;
 }
 
+async function loadAndroidApps(force = false) {
+  if (!ANDROID) return;
+  if (state.androidAppsLoading || (!force && state.androidApps.length)) return;
+  state.androidAppsLoading = true;
+  state.androidAppsError = '';
+  if (state.activeNav === 'settings') render();
+  try {
+    state.androidApps = await desktopBridge.listApps();
+  } catch (error) {
+    state.androidAppsError = errorText(error);
+  } finally {
+    state.androidAppsLoading = false;
+    if (state.activeNav === 'settings') render();
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll('[data-server]').forEach((button) => button.addEventListener('click', () => selectServer(button.dataset.server)));
   document.querySelectorAll('[data-nav]').forEach((button) => button.addEventListener('click', async () => {
     state.activeNav = button.dataset.nav; render(); document.querySelector(`[data-focus-key="nav-${state.activeNav}"]`)?.focus();
     if (state.activeNav === 'logs') { await loadLogs(); await loadProxyDiagnostics(); if (state.activeNav === 'logs') render(); }
+    if (state.activeNav === 'settings' && ANDROID) void loadAndroidApps();
   }));
+  document.querySelector('#android-split')?.addEventListener('change', (event) => {
+    const split = ['include', 'exclude'].includes(event.target.value) ? event.target.value : 'off';
+    commitData({ settings: { ...(state.settings || {}), androidSplit: split } });
+    if (split !== 'off') void loadAndroidApps();
+    render();
+  });
+  document.querySelector('#android-local-network')?.addEventListener('change', (event) => {
+    commitData({ settings: { ...(state.settings || {}), androidLocalNetwork: Boolean(event.target.checked) } });
+    render();
+  });
+  document.querySelector('#android-app-search')?.addEventListener('change', (event) => {
+    state.androidAppsQuery = String(event.target.value || '');
+    render();
+  });
+  document.querySelectorAll('[data-android-app]').forEach((input) => input.addEventListener('change', () => {
+    const selected = new Set(Array.isArray(state.settings?.androidPackages) ? state.settings.androidPackages : []);
+    if (input.checked) selected.add(input.dataset.androidApp); else selected.delete(input.dataset.androidApp);
+    commitData({ settings: { ...(state.settings || {}), androidPackages: [...selected] } });
+  }));
+  document.querySelector('[data-action="android-apps-refresh"]')?.addEventListener('click', () => loadAndroidApps(true));
+  document.querySelector('[data-action="android-notifications"]')?.addEventListener('click', async () => {
+    try {
+      const result = await desktopBridge.requestNotificationPermission();
+      state.notice = { type: 'info', text: t(result?.granted ? 'settings.android.notificationsGranted' : 'settings.android.notificationsRequested') };
+    } catch (error) {
+      state.notice = { type: 'error', text: errorText(error) };
+    }
+    render();
+  });
   document.querySelectorAll('[data-group]').forEach((button) => button.addEventListener('click', () => {
     const key = button.dataset.group;
     state.collapsed = state.collapsed.includes(key) ? state.collapsed.filter((item) => item !== key) : [...state.collapsed, key];
@@ -1419,10 +1500,15 @@ function handleClientUpdateProgress(payload) {
 }
 function autoPool(selected) {
   if (state.settings?.nodeMode !== 'auto' || !selected) return [];
+  const failover = ['any', 'never'].includes(state.settings?.failover) ? state.settings.failover : 'country';
+  // "Do not switch" must not silently build a leastPing pool: that would
+  // change the exit country even though the user disabled switching.
+  if (failover === 'never') return [];
   const usable = state.servers.filter((item) => item.id !== selected.id && !unsupportedReason(item) && !item.unsupported);
   const favorites = usable.filter((item) => item.favorite);
   const sameCountry = selected.country ? usable.filter((item) => item.country === selected.country && !item.favorite) : [];
-  return [selected, ...(favorites.length ? favorites : sameCountry).slice(0, 5)];
+  const candidates = favorites.length ? favorites : (failover === 'any' ? usable : sameCountry);
+  return [selected, ...candidates.slice(0, 5)];
 }
 
 
@@ -1486,9 +1572,59 @@ async function startSelected(node) {
     const snapshotNode = await protectNodeAddress(copyNode(node));
     const poolRaw = autoPool(snapshotNode);
     const pool = poolRaw.length > 1 ? await Promise.all(poolRaw.map(protectNodeAddress)) : poolRaw;
-    const config = buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { dns: dnsProtectionOn() ? 'builtin' : 'system', perf: { ...(state.settings?.perf || {}), tcpFastOpen: fastReconnectOn() }, auto: pool.length > 1 ? pool : undefined, xhttpQuery: state.settings?.xhttpQueryParams !== false });
-    const result = await desktopBridge.connect({ config, debug: Boolean(state.settings?.debug) });
+    const sharedOptions = { perf: { ...(state.settings?.perf || {}), tcpFastOpen: fastReconnectOn() }, auto: pool.length > 1 ? pool : undefined, xhttpQuery: state.settings?.xhttpQueryParams !== false };
+    const config = ANDROID
+      ? buildAndroidXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, sharedOptions)
+      : buildXrayConfig(pool.length > 1 ? pool : [snapshotNode], snapshotNode.id, route, state.routing?.profile || null, { ...sharedOptions, dns: dnsProtectionOn() ? 'builtin' : 'system' });
+    const androidSplit = ['include', 'exclude'].includes(state.settings?.androidSplit) ? state.settings.androidSplit : 'off';
+    const androidPackages = Array.isArray(state.settings?.androidPackages) ? state.settings.androidPackages : [];
+    const result = await desktopBridge.connect({
+      config,
+      debug: Boolean(state.settings?.debug),
+      ...(ANDROID ? {
+        splitMode: androidSplit,
+        includePackages: androidSplit === 'include' ? androidPackages : [],
+        excludePackages: androidSplit === 'exclude' ? androidPackages : [],
+        localNetwork: Boolean(state.settings?.androidLocalNetwork),
+        nodeLabel: snapshotNode.name || '',
+        country: snapshotNode.country || ''
+      } : {})
+    });
+    if (result?.consentRequired) {
+      // VpnService.prepare() shows a system dialog. The plugin starts the
+      // tunnel from onResume() after the user allows it; wait for that instead
+      // of leaving the UI idle while a VPN is already coming up.
+      state.connection = 'connecting';
+      setMessage('state.consentWaiting');
+      render();
+      let approved = false;
+      for (let attempt = 0; attempt < 360; attempt += 1) {
+        await sleep(250);
+        if (operation !== operationSequence || exitSequence !== exitsAtStart) return;
+        const consentStatus = await desktopBridge.status();
+        if (consentStatus?.running) { approved = true; break; }
+        if (consentStatus?.message) {
+          throw Object.assign(new Error('androidStart'), { code: 'androidStart', params: { error: consentStatus.message } });
+        }
+      }
+      if (!approved) {
+        state.connection = 'idle';
+        setMessage('state.consentDenied');
+        render();
+        return;
+      }
+    }
     if (result?.ok === false) throw Object.assign(new Error('coreLaunch'), { code: 'coreLaunch', params: { error: coreErrorText(result.error) } });
+    if (ANDROID) {
+      let status = await desktopBridge.status();
+      for (let attempt = 0; attempt < 24 && !status?.running && !status?.message; attempt += 1) {
+        await sleep(250);
+        status = await desktopBridge.status();
+      }
+      if (!status?.running) {
+        throw Object.assign(new Error('androidStart'), { code: 'androidStart', params: { error: status?.message || 'VPN service did not start' } });
+      }
+    }
     if (result?.warning) {
       state.proxyWarning = result.warning;
       state.notice = { type: 'error', text: result.warning };
@@ -1497,10 +1633,13 @@ async function startSelected(node) {
     logXhttpSummary(config);
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringConnect'), { code: 'xrayExitedDuringConnect' });
     setMessage('state.checkingInternet'); render();
-    const ip = await desktopBridge.probeInternet();
+    const ip = ANDROID ? null : await desktopBridge.probeInternet();
     if (operation !== operationSequence || exitSequence !== exitsAtStart) throw Object.assign(new Error('xrayExitedDuringProbe'), { code: 'xrayExitedDuringProbe' });
-    if (!ip) throw Object.assign(new Error('probeEmpty'), { code: 'probeEmpty' });
+    if (!ANDROID && !ip) throw Object.assign(new Error('probeEmpty'), { code: 'probeEmpty' });
     state.activeNode = snapshotNode; state.activeRouteMode = route; state.externalIp = ip; state.connectedAt = Date.now(); state.connection = 'connected'; setMessage('state.established'); sessionSequence += 1; render(); syncTray();
+    // Ask after the VPN consent dialog has closed: two system dialogs at once
+    // can make Android drop the consent flow. A denial never stops the tunnel.
+    if (ANDROID) void desktopBridge.requestNotificationPermission?.()?.catch(() => {});
     void pingProxy();
     latencyTimer = setInterval(() => { if (state.connection === 'connected' && !state.proxyTesting) void pingProxy(); }, 15000);
   } catch (error) {
@@ -1668,6 +1807,34 @@ void (async () => {
   try { await desktopBridge.watchClientUpdate(handleClientUpdateProgress); } catch { /* обновления только в настольной сборке */ }
   state.watchError = watchError;
   if (!capabilities.native) { state.bridgeReady = !watchError; if (watchError) { state.connection = 'error'; setMessage('state.watchFailed', { error: watchError }); } setMessage('state.previewNoConnect'); render(); return; }
+  if (ANDROID) {
+    // The Android service owns the tunnel across WebView/Activity restarts.
+    // Do not call disconnect() here: that would tear down an always-on VPN
+    // every time the UI is opened.
+    try {
+      const status = await desktopBridge.status();
+      state.bridgeReady = true;
+      if (status?.running) {
+        state.connection = 'connected';
+        state.activeNode = selectedNode();
+        state.activeRouteMode = state.routeMode;
+        state.connectedAt = Number(status.startedAt) || Date.now();
+        state.externalIp = null;
+        setMessage('state.established');
+      } else if (status?.message) {
+        state.connection = 'error';
+        state.message = { key: 'raw', params: { text: status.message } };
+      } else {
+        state.connection = 'idle';
+        setMessage('state.chooseServer');
+      }
+    } catch (error) {
+      state.connection = 'error';
+      state.message = { key: 'raw', params: { text: errorText(error) } };
+    }
+    render();
+    return;
+  }
   // The bridge has no status query. On a frontend reload, stop any surviving session before
   // declaring it idle; a successful stop is the backend's restoration guarantee.
   let cleanupError = '';

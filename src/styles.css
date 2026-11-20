@@ -518,3 +518,42 @@ select:disabled { opacity: 0.5; }
   .home-switch .switch-text strong { font-size: 12px; }
   .home-switch .info { display: none; }
 }
+
+/* Android phase 1: split-tunnelling app picker */
+.android-app-tools { margin: 8px 0 10px; }
+.android-app-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border, #2b2b3a);
+  border-radius: 10px;
+  margin-bottom: 12px;
+}
+.android-app-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border, #2b2b3a);
+  cursor: pointer;
+}
+.android-app-row:last-child { border-bottom: 0; }
+.android-app-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  object-fit: contain;
+  flex: 0 0 32px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.android-app-icon.placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  color: #fff;
+  background: #7c3aed;
+}
+.android-app-name { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.android-app-name strong, .android-app-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.android-app-name small { opacity: 0.6; font-size: 0.75rem; }
+.android-app-row input { width: 20px; height: 20px; flex: 0 0 auto; }

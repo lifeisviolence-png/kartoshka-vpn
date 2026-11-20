@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseSubscriptionDetailed, parseUserinfo, parseHappRouting, parseRoutingProfile } from '../src/subscription.js';
-import { buildXrayConfig } from '../src/xray-config.js';
+import { buildAndroidXrayConfig, buildXrayConfig, ANDROID_TUN_MTU } from '../src/xray-config.js';
 
 // All credentials and addresses below are fabricated test fixtures.
 const id = '11111111-1111-4111-8111-111111111111';
@@ -410,6 +410,49 @@ test('xray run -test принимает DoH-конфиг и TCP Fast Open', { sk
       writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
       const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
       assert.equal(result.status, 0, `ядро отклонило ${name}: ${result.stderr} ${result.stdout}`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Android: только TUN inbound, без TCP-слушателей, с DoH и sniffing', () => {
+  for (const mode of ['all', 'auto', 'split']) {
+    const node = parseOne(vless);
+    const c = buildAndroidXrayConfig([node], node.id, mode);
+    assert.equal(c.inbounds.length, 1);
+    assert.equal(c.inbounds[0].protocol, 'tun');
+    assert.equal(c.inbounds[0].settings.name, 'kpv0');
+    assert.equal(c.inbounds[0].settings.mtu, ANDROID_TUN_MTU);
+    assert.equal(c.inbounds[0].listen, undefined);
+    assert.equal(c.inbounds[0].port, undefined);
+    assert.equal(c.inbounds[0].sniffing.enabled, true);
+    assert.equal(c.inbounds[0].sniffing.routeOnly, true);
+    assert.equal(c.log.access, undefined, 'access-лог не должен включаться в Android-конфиге');
+    assert.ok(c.dns, 'DoH-модуль обязателен для TUN');
+    assert.ok(c.dns.servers.every((server) => server.address.startsWith('https://')));
+    assert.ok(c.dns.servers.every((server) => !/\/\/(?:[a-z0-9-]+\.)+[a-z]{2,}\//i.test(server.address)), 'имена DoH-серверов не должны требовать системного DNS');
+    assert.ok(c.routing.rules.some((rule) => rule.inboundTag?.includes('dns-query') && rule.outboundTag === 'proxy'));
+  }
+});
+
+test('Android: MTU ограничен 1280–1500, outbounds совпадают с десктопом', () => {
+  const node = parseOne(xhttp);
+  const desktop = buildXrayConfig([node], node.id, 'all');
+  const android = buildAndroidXrayConfig([node], node.id, 'all');
+  assert.deepEqual(android.outbounds, desktop.outbounds);
+  assert.equal(code(() => buildAndroidXrayConfig([node], node.id, 'all', null, { mtu: 1279 })), 'config.androidMtu');
+  assert.equal(code(() => buildAndroidXrayConfig([node], node.id, 'all', null, { mtu: 1501 })), 'config.androidMtu');
+  assert.equal(buildAndroidXrayConfig([node], node.id, 'all', null, { mtu: 1400 }).inbounds[0].settings.mtu, 1400);
+});
+
+test('Android: VLESS Reality, XHTTP, Trojan и Hysteria2 проходят xray run -test', { skip: !process.env.XRAY_TEST_BIN }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kartovpn-android-'));
+  try {
+    for (const [index, link] of [vless, xhttp, trojan, hy2Tuned].entries()) {
+      const node = parseOne(link);
+      const path = join(dir, `${index}.json`);
+      writeFileSync(path, JSON.stringify(buildAndroidXrayConfig([node], node.id, 'auto')), { mode: 0o600 });
+      const result = spawnSync(process.env.XRAY_TEST_BIN, ['run', '-test', '-config', path], { encoding: 'utf8' });
+      assert.equal(result.status, 0, `ядро отклонило Android-конфигурацию ${index}: ${result.stderr} ${result.stdout}`);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

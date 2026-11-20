@@ -207,6 +207,13 @@ export const DOH_SERVERS = {
   fallback: FALLBACK_PROVIDER.ipUrl
 };
 export const DNS_INBOUND_TAG = 'dns-query';
+// Android TUN settings. 1500 is the Ethernet/Android default and the value
+// proven in phase 0; the TUN test does not fragment TCP. The range is bounded
+// so a bad caller cannot create an unusable interface.
+export const ANDROID_TUN_NAME = 'kpv0';
+export const ANDROID_TUN_MTU = 1500;
+export const ANDROID_TUN_MTU_MIN = 1280;
+export const ANDROID_TUN_MTU_MAX = 1500;
 function builtinDns() {
   return {
     tag: DNS_INBOUND_TAG,
@@ -250,6 +257,10 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
     rules.push({ type: 'field', ip: DEFAULT_DIRECT.ips, outboundTag: 'direct' });
   }
   const dnsMode = DNS_MODES.includes(options.dns) ? options.dns : 'system';
+  // Android always needs the DNS module: the TUN captures UDP/53, so a config
+  // without it would leak or blackhole names. `forceDns` makes the module and
+  // its proxy rule exist even when there are no routing rules ("all" mode).
+  const forceDns = options.forceDns === true;
   // Tuning is opt-in: each switch was measured on the stand (docs/perf.md) and
   // none of them improved the median by the required 10 %, so all default off.
   const perf = options.perf && typeof options.perf === 'object' ? options.perf : {};
@@ -278,7 +289,7 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
   if (needsBlock) outbounds.push({ tag: 'block', protocol: 'blackhole' });
   // Built-in DNS must not leak to the provider: match its internal queries by tag
   // (documented for Xray 26.10.31) and send them through the same proxy outbound.
-  if (dnsMode === 'builtin' && rules.length) {
+  if (dnsMode === 'builtin' && (rules.length || forceDns)) {
     rules.unshift({ type: 'field', inboundTag: [DNS_INBOUND_TAG], outboundTag: 'proxy' });
   }
   if (balanced) {
@@ -298,4 +309,34 @@ export function buildXrayConfig(nodes, selectedId, routeMode, routingProfile = n
     ...(rules.length && dnsMode === 'builtin' ? { dns: builtinDns() } : {}),
     ...(balanced ? { observatory: { subjectSelector: ['proxy-'], probeUrl: 'https://www.gstatic.com/generate_204', probeInterval: '30s', enableConcurrency: true } } : {})
   };
+}
+
+/**
+ * Android configuration: one TUN inbound instead of HTTP/SOCKS listeners.
+ * The app must not open any TCP listener on loopback, so this function is the
+ * only supported way to build a config for the Android service.
+ */
+export function buildAndroidXrayConfig(nodes, selectedId, routeMode, routingProfile = null, options = {}) {
+  const mtu = options.mtu === undefined ? ANDROID_TUN_MTU : Number(options.mtu);
+  if (!Number.isInteger(mtu) || mtu < ANDROID_TUN_MTU_MIN || mtu > ANDROID_TUN_MTU_MAX) {
+    failCode('config.androidMtu', { min: ANDROID_TUN_MTU_MIN, max: ANDROID_TUN_MTU_MAX });
+  }
+  const config = buildXrayConfig(nodes, selectedId, routeMode, routingProfile, {
+    ...options,
+    // Android never falls back to plain DNS: the TUN captures UDP/53 and the
+    // built-in DoH module answers it through the proxy outbound.
+    dns: 'builtin',
+    forceDns: true
+  });
+  const sniffing = options.sniffing !== false;
+  config.inbounds = [{
+    tag: 'tun-in',
+    protocol: 'tun',
+    settings: { name: ANDROID_TUN_NAME, mtu },
+    ...(sniffing ? { sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: true } } : {})
+  }];
+  // No access log in production: destinations and credentials must not land in
+  // app-private files. The service adds the fd through `env.xray.tun.fd`.
+  if (config.log) delete config.log.access;
+  return config;
 }

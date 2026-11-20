@@ -24,6 +24,7 @@ impl<R: Runtime> Vpn<R> {
     Ok(TunnelStatus {
       running: false,
       message: Some("Android VPN plugin is only available on Android".into()),
+      ..Default::default()
     })
   }
 
@@ -31,6 +32,7 @@ impl<R: Runtime> Vpn<R> {
     Ok(TunnelStatus {
       running: false,
       message: Some("Android VPN plugin is only available on Android".into()),
+      ..Default::default()
     })
   }
 
@@ -38,6 +40,23 @@ impl<R: Runtime> Vpn<R> {
     Ok(TunnelStatus {
       running: false,
       message: Some("Android VPN plugin is only available on Android".into()),
+      ..Default::default()
     })
+  }
+
+  pub fn android_connect(&self, _payload: AndroidConnectRequest) -> crate::Result<TunnelStatus> {
+    self.status()
+  }
+
+  pub fn android_disconnect(&self) -> crate::Result<TunnelStatus> {
+    self.status()
+  }
+
+  pub fn android_apps(&self) -> crate::Result<AndroidAppsResponse> {
+    Ok(AndroidAppsResponse::default())
+  }
+
+  pub fn notification_permission(&self) -> crate::Result<NotificationPermission> {
+    Ok(NotificationPermission { granted: false })
   }
 }
