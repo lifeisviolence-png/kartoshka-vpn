@@ -151,6 +151,13 @@ timeout 30 adb logcat -d -s KPV_PHASE1:* | tail -160
 timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'tunnel started fd='
 timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'xray state: true'
 
+# establish() returns the fd before Android has finished publishing the tun
+# interface. Poll briefly so the network assertions below do not race it.
+for _ in $(seq 1 20); do
+  if timeout 10 adb shell ip addr show tun0 2>/dev/null | grep -q '10.8.0.2'; then break; fi
+  sleep 1
+done
+
 echo '--- network state ---'
 timeout 30 adb shell ip addr || true
 timeout 30 adb shell ip route || true
