@@ -13,7 +13,8 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
-import java.io.File
+import libXray.LibXray
+import org.json.JSONObject
 
 @InvokeArg
 class PingArgs {
@@ -86,15 +87,18 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     fun xrayVersion(invoke: Invoke) {
         val result = JSObject()
         try {
-            val binary = File(activity.applicationInfo.nativeLibraryDir, "libxray.so")
-            val process = ProcessBuilder(binary.absolutePath, "version")
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().use { it.readText() }
-            process.waitFor()
-            result.put("output", output.take(500))
-            result.put("exitCode", process.exitValue())
-        } catch (error: Exception) {
+            val request = JSONObject()
+                .put("apiVersion", 3)
+                .put("method", "xrayVersion")
+            val response = JSONObject(LibXray.invoke(request.toString()))
+            if (response.optBoolean("success")) {
+                result.put("output", response.optJSONObject("data")?.optString("version") ?: "")
+                result.put("exitCode", 0)
+            } else {
+                result.put("output", "")
+                result.put("error", response.optString("error", "xrayVersion failed"))
+            }
+        } catch (error: Throwable) {
             result.put("output", "")
             result.put("error", error.message ?: error.javaClass.simpleName)
         }

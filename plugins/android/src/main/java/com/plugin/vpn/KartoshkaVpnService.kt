@@ -10,15 +10,21 @@ import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.system.Os
-import android.system.OsConstants
 import android.util.Log
-import java.io.File
+import libXray.LibXray
+import org.json.JSONObject
 
 /**
  * Phase 0 spike service. It deliberately contains only the minimum needed to
  * prove that Android's VpnService TUN fd can be handed to the official Xray
- * Android binary and that the service survives the Activity going away.
+ * core and that the service survives the Activity going away.
+ *
+ * The official Xray Android library (XTLS/libXray, built from Xray-core
+ * 26.10.31) runs in this process. The fd is passed in the root `env` object as
+ * `xray.tun.fd`, so there is no fork/exec and Android's process launcher cannot
+ * close the descriptor. The previous binary + ProcessBuilder variant failed
+ * with `bad file descriptor` because AOSP's childProcess() closes every fd
+ * except stdio before exec.
  *
  * This is not the production tunnel: the real service will receive an encrypted
  * configuration and will add split tunneling, network callbacks, health checks,
@@ -43,14 +49,17 @@ class KartoshkaVpnService : VpnService() {
     }
 
     private var tun: ParcelFileDescriptor? = null
-    private var process: Process? = null
-    private var outputThread: Thread? = null
+    private var coreStarted: Boolean = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
                 startForegroundNotification()
-                startTunnel(intent.getStringExtra(EXTRA_CONFIG) ?: DEFAULT_CONFIG)
+                val config = intent.getStringExtra(EXTRA_CONFIG) ?: DEFAULT_CONFIG
+                // Starting Xray can take longer than the main-thread budget on
+                // a slow emulator. Keep onStartCommand quick and let the
+                // foreground notification cover the startup window.
+                Thread({ startTunnel(config) }, "kpv-start").start()
             }
             ACTION_STOP -> stopTunnel()
             else -> {
@@ -75,7 +84,6 @@ class KartoshkaVpnService : VpnService() {
             }
             manager.createNotificationChannel(channel)
         }
-
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
         val pendingIntent = launchIntent?.let {
             PendingIntent.getActivity(
@@ -98,7 +106,6 @@ class KartoshkaVpnService : VpnService() {
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .build()
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -114,8 +121,9 @@ class KartoshkaVpnService : VpnService() {
         }
     }
 
+    @Synchronized
     private fun startTunnel(configJson: String) {
-        if (tun != null) return
+        if (tun != null || coreStarted) return
         lastError = null
         try {
             val builder = Builder()
@@ -132,67 +140,76 @@ class KartoshkaVpnService : VpnService() {
             val pfd = builder.establish() ?: error("VpnService.establish() returned null")
             tun = pfd
 
-            // Java's process launcher may set FD_CLOEXEC. Xray receives the
-            // descriptor number through XRAY_TUN_FD, so clear that flag before
-            // fork/exec. The ParcelFileDescriptor remains owned by this service.
-            Os.fcntlInt(pfd.fileDescriptor, OsConstants.F_SETFD, 0)
-
-            val config = File(filesDir, "phase0-xray.json")
-            config.writeText(configJson)
-            val binary = File(applicationInfo.nativeLibraryDir, "libxray.so")
-            if (!binary.exists()) error("libxray.so is missing from nativeLibraryDir")
-            logXrayVersion(binary)
-
-            val command = ProcessBuilder(binary.absolutePath, "run", "-c", config.absolutePath)
-            command.environment()["XRAY_TUN_FD"] = pfd.fd.toString()
-            command.redirectErrorStream(true)
-            val child = command.start()
-            process = child
-            outputThread = Thread {
-                try {
-                    child.inputStream.bufferedReader().forEachLine { line ->
-                        // The Phase 0 config contains no credentials. Keep only
-                        // diagnostic lines and never dump the configuration.
-                        if (line.isNotBlank()) Log.i(TAG, "xray: $line")
-                    }
-                } catch (error: Exception) {
-                    Log.w(TAG, "xray output reader stopped: ${error.javaClass.simpleName}")
-                }
-            }.also { it.start() }
-
+            Log.i(TAG, "xray version: ${xrayVersion()}")
+            val xrayConfig = JSONObject(configJson)
+            xrayConfig.put("env", JSONObject().put("xray.tun.fd", pfd.fd.toString()))
+            val request = JSONObject()
+                .put("apiVersion", 3)
+                .put("method", "runXray")
+                .put("payload", JSONObject().put("xrayJson", xrayConfig.toString()))
+            val response = JSONObject(LibXray.invoke(request.toString()))
+            if (!response.optBoolean("success")) {
+                error("runXray failed: ${response.optString("error", "unknown error")}")
+            }
+            coreStarted = true
             running = true
             Log.i(TAG, "tunnel started fd=${pfd.fd}")
-        } catch (error: Exception) {
+            Log.i(TAG, "xray state: ${xrayRunning()}")
+        } catch (error: Throwable) {
             lastError = error.message ?: error.javaClass.simpleName
             Log.e(TAG, "tunnel start failed: $lastError")
             stopTunnel()
         }
     }
 
-    private fun logXrayVersion(binary: File) {
-        try {
-            val versionProcess = ProcessBuilder(binary.absolutePath, "version")
-                .redirectErrorStream(true)
-                .start()
-            val firstLine = versionProcess.inputStream.bufferedReader().use { reader ->
-                reader.lineSequence().firstOrNull { it.isNotBlank() }
+    private fun xrayVersion(): String {
+        return try {
+            val request = JSONObject()
+                .put("apiVersion", 3)
+                .put("method", "xrayVersion")
+            val response = JSONObject(LibXray.invoke(request.toString()))
+            if (response.optBoolean("success")) {
+                response.optJSONObject("data")?.optString("version") ?: "unknown"
+            } else {
+                "unknown"
             }
-            versionProcess.waitFor()
-            Log.i(TAG, "xray version: ${firstLine ?: "unknown"}")
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             Log.w(TAG, "xray version check failed: ${error.javaClass.simpleName}")
+            "unknown"
         }
     }
 
+    private fun xrayRunning(): Boolean {
+        return try {
+            val request = JSONObject()
+                .put("apiVersion", 3)
+                .put("method", "getXrayState")
+            val response = JSONObject(LibXray.invoke(request.toString()))
+            response.optBoolean("success") &&
+                (response.optJSONObject("data")?.optBoolean("running") == true)
+        } catch (error: Throwable) {
+            Log.w(TAG, "xray state check failed: ${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    @Synchronized
     private fun stopTunnel() {
         running = false
-        try {
-            process?.destroy()
-        } catch (_: Exception) {
+        if (coreStarted) {
+            try {
+                val request = JSONObject()
+                    .put("apiVersion", 3)
+                    .put("method", "stopXray")
+                val response = JSONObject(LibXray.invoke(request.toString()))
+                if (!response.optBoolean("success")) {
+                    Log.w(TAG, "stopXray failed: ${response.optString("error", "unknown error")}")
+                }
+            } catch (error: Throwable) {
+                Log.w(TAG, "stopXray failed: ${error.javaClass.simpleName}")
+            }
+            coreStarted = false
         }
-        process = null
-        outputThread?.interrupt()
-        outputThread = null
         try {
             tun?.close()
         } catch (_: Exception) {
@@ -217,6 +234,9 @@ class KartoshkaVpnService : VpnService() {
         super.onDestroy()
     }
 
+    // Phase 0 test config only. `access` is enabled so CI can see that Xray
+    // accepted the redirected test connection. Production configs must set
+    // access to "none" and must not log destinations or credentials.
     private val DEFAULT_CONFIG = """
         {
           "log": { "logLevel": "info", "access": "" },
@@ -224,7 +244,7 @@ class KartoshkaVpnService : VpnService() {
             {
               "tag": "tun-in",
               "protocol": "tun",
-              "settings": { "name": "kpv0", "mtu": 1500 }
+              "settings": { "mtu": 1500 }
             }
           ],
           "outbounds": [

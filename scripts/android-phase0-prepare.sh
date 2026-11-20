@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
 # Phase 0 spike helper. The generated Tauri Android project is intentionally
-# not committed; this script creates it and applies the minimum settings and
-# the official Xray Android binary needed by the spike.
+# not committed; this script creates it, applies the minimum Android settings,
+# and downloads the official XTLS/libXray Android AAR with a pinned SHA-256.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_PROJECT="$ROOT/src-tauri/gen/android"
-XRAY_VERSION="26.10.31"
-XRAY_ABI="${1:-x86_64}"
-case "$XRAY_ABI" in
-  x86_64)
-    XRAY_ASSET="Xray-android-amd64.zip"
-    XRAY_ABI_DIR="x86_64"
-    ;;
-  arm64-v8a)
-    XRAY_ASSET="Xray-android-arm64-v8a.zip"
-    XRAY_ABI_DIR="arm64-v8a"
+LIBXRAY_VERSION="26.10.31"
+LIBXRAY_SHA256="fb99f04acf379cc2957c1e1d0ce2b3c0005d3f49974a44c09a11242a0562c1ca"
+ANDROID_ABI="${1:-x86_64}"
+
+case "$ANDROID_ABI" in
+  x86_64|arm64-v8a)
     ;;
   *)
-    echo "unsupported Xray Android ABI: $XRAY_ABI" >&2
+    echo "unsupported Android ABI: $ANDROID_ABI" >&2
     exit 2
     ;;
 esac
@@ -49,6 +45,12 @@ if "jniLibs.useLegacyPackaging" not in text:
         "    packaging {\n        jniLibs.useLegacyPackaging = true\n    }\n    buildTypes {",
         1,
     )
+if 'libs/libXray.aar' not in text:
+    text = text.replace(
+        "dependencies {",
+        'dependencies {\n    implementation(files("libs/libXray.aar"))',
+        1,
+    )
 build.write_text(text)
 
 manifest = root / "app/src/main/AndroidManifest.xml"
@@ -57,19 +59,19 @@ m = re.sub(r'\n\s*android:extractNativeLibs="[^"]*"', "", m)
 manifest.write_text(m)
 PY
 
-JNI_DIR="$ANDROID_PROJECT/app/src/main/jniLibs/$XRAY_ABI_DIR"
-mkdir -p "$JNI_DIR"
+APP_LIBS="$ANDROID_PROJECT/app/libs"
+PLUGIN_LIBS="$ROOT/plugins/android/libs"
+mkdir -p "$APP_LIBS" "$PLUGIN_LIBS"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-URL="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/${XRAY_ASSET}"
-curl -fsSL "$URL" -o "$TMP/xray.zip"
-curl -fsSL "$URL.dgst" -o "$TMP/xray.zip.dgst"
-EXPECTED="$(awk -F'= ' '/^SHA2-256=/{print $2}' "$TMP/xray.zip.dgst")"
-ACTUAL="$(sha256sum "$TMP/xray.zip" | awk '{print $1}')"
-if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
-  echo "Xray Android archive checksum mismatch: expected=$EXPECTED actual=$ACTUAL" >&2
+
+URL="https://github.com/XTLS/libXray/releases/download/v${LIBXRAY_VERSION}/libxray-android.zip"
+curl -fsSL "$URL" -o "$TMP/libxray-android.zip"
+ACTUAL="$(sha256sum "$TMP/libxray-android.zip" | awk '{print $1}')"
+if [ "$ACTUAL" != "$LIBXRAY_SHA256" ]; then
+  echo "libXray Android archive checksum mismatch: expected=$LIBXRAY_SHA256 actual=$ACTUAL" >&2
   exit 3
 fi
-unzip -p "$TMP/xray.zip" xray > "$JNI_DIR/libxray.so"
-chmod 755 "$JNI_DIR/libxray.so"
-echo "Xray Android $XRAY_VERSION ($XRAY_ABI_DIR) ready: $ACTUAL"
+unzip -p "$TMP/libxray-android.zip" libxray-android/libXray.aar > "$APP_LIBS/libXray.aar"
+cp "$APP_LIBS/libXray.aar" "$PLUGIN_LIBS/libXray.aar"
+echo "libXray Android $LIBXRAY_VERSION ($ANDROID_ABI) ready: $ACTUAL"

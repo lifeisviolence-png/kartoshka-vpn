@@ -78,7 +78,7 @@ jobs:
         run: |
           APK=src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
           test -f "$APK"
-          unzip -l "$APK" | grep -E 'lib/x86_64/(libxray|libkartoshka_vpn_lib)\.so'
+          unzip -l "$APK" | grep -E 'lib/x86_64/(libgojni|libkartoshka_vpn_lib)\.so'
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -E "package:|sdkVersion|targetSdkVersion"
 
       - name: Emulator spike (x86_64 API 34, TCG)
@@ -102,4 +102,5 @@ jobs:
             /tmp/kpv-http-8080.log
             /tmp/kpv-http-8081.log
             /tmp/kpv-response.txt
+            /tmp/kpv-logcat.txt
           if-no-files-found: warn

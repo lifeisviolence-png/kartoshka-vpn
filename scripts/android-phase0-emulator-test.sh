@@ -3,12 +3,13 @@
 # after the x86_64 debug APK has been built.
 #
 # The test is deliberately strict:
-#   - the official Xray binary must execute from nativeLibraryDir;
-#   - VpnService must create a TUN and pass its fd to Xray;
+#   - the official XTLS/libXray Android library must load and report its version;
+#   - VpnService must create a TUN and pass its fd to the in-process Xray core;
 #   - the HTTP request is sent to 10.0.2.2:8080, but Xray's freedom outbound
 #     redirects it to 10.0.2.2:8081. A request that bypasses the TUN reaches
 #     8080 directly and fails the test;
-#   - the service and the Xray process must survive the Activity going Home.
+#   - the service and the in-process Xray state must survive the Activity
+#     going Home.
 set -euo pipefail
 
 PKG="ru.kartoshka.vpn"
@@ -17,43 +18,46 @@ APK="src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-d
 LOG_8080="/tmp/kpv-http-8080.log"
 LOG_8081="/tmp/kpv-http-8081.log"
 RESPONSE="/tmp/kpv-response.txt"
+LOGCAT="/tmp/kpv-logcat.txt"
 
 test -f "$APK"
 
-adb install -r "$APK"
-adb shell appops set "$PKG" ACTIVATE_VPN allow
-adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || true
+timeout 600 adb install -r "$APK"
+timeout 30 adb shell appops set "$PKG" ACTIVATE_VPN allow
+timeout 30 adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || true
 
 python3 -m http.server 8080 --bind 0.0.0.0 >"$LOG_8080" 2>&1 &
 PID_8080=$!
 python3 -m http.server 8081 --bind 0.0.0.0 >"$LOG_8081" 2>&1 &
 PID_8081=$!
 cleanup() {
+  timeout 30 adb logcat -d -s KPV_PHASE0:* >"$LOGCAT" 2>&1 || true
   kill "$PID_8080" "$PID_8081" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-adb logcat -c
-adb shell am start -W -n "$ACTIVITY" || true
+timeout 30 adb logcat -c
+timeout 300 adb shell am start -W -n "$ACTIVITY" || true
 
 # TCG is slow. Wait for the service log instead of guessing a fixed delay.
 for _ in $(seq 1 90); do
-  if adb logcat -d -s KPV_PHASE0:* | grep -q 'tunnel started fd='; then
+  if timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'tunnel started fd='; then
     break
   fi
   sleep 2
 done
 
 echo '--- phase0 logcat ---'
-adb logcat -d -s KPV_PHASE0:* | tail -120
-adb logcat -d -s KPV_PHASE0:* | grep -q 'xray version:'
-adb logcat -d -s KPV_PHASE0:* | grep -q 'tunnel started fd='
-adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'
-adb shell ps -A | grep -E 'libxray|xray' || true
+timeout 30 adb logcat -d -s KPV_PHASE0:* | tail -120
+timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'xray version:'
+timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'tunnel started fd='
+timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'xray state: true'
+timeout 60 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'
+timeout 30 adb shell ps -A | grep -q "$PKG"
 
 echo '--- traffic through TUN ---'
 set +e
-adb shell "toybox wget -qO- http://10.0.2.2:8080/ 2>/dev/null || printf 'GET / HTTP/1.0\r\nHost: 10.0.2.2\r\n\r\n' | toybox nc 10.0.2.2 8080" >"$RESPONSE"
+timeout 90 adb shell "toybox wget -qO- http://10.0.2.2:8080/ 2>/dev/null || printf 'GET / HTTP/1.0\r\nHost: 10.0.2.2\r\n\r\n' | toybox nc 10.0.2.2 8080" >"$RESPONSE"
 CLIENT_RC=$?
 set -e
 echo "client exit=$CLIENT_RC"
@@ -70,8 +74,9 @@ test -s "$RESPONSE"
 grep -q 'Directory listing' "$RESPONSE"
 
 echo '--- activity close check ---'
-adb shell input keyevent 3
+timeout 30 adb shell input keyevent 3
 sleep 5
-adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'
-adb shell ps -A | grep -E 'libxray|xray'
+timeout 60 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'
+timeout 30 adb shell ps -A | grep -q "$PKG"
+timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'xray state: true'
 echo 'PHASE0_EMULATOR_OK'
