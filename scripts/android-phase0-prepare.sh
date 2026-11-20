@@ -36,7 +36,7 @@ import sys
 root = Path(sys.argv[1])
 build = root / "app/build.gradle.kts"
 text = build.read_text()
-text = re.sub(r"compileSdk\s*=\s*\d+", "compileSdk = 37", text)
+text = re.sub(r"compileSdk\s*=\s*\d+", "compileSdk = 36", text)
 text = re.sub(r"minSdk\s*=\s*\d+", "minSdk = 26", text)
 text = re.sub(r"targetSdk\s*=\s*\d+", "targetSdk = 35", text)
 if "jniLibs.useLegacyPackaging" not in text:

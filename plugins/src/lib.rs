@@ -39,7 +39,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
       commands::ping,
       commands::start_test,
       commands::stop_test,
-      commands::status
+      commands::status,
+      commands::android_connect,
+      commands::android_disconnect,
+      commands::android_apps,
+      commands::android_notification_permission
     ])
     .setup(|app, api| {
       #[cfg(mobile)]

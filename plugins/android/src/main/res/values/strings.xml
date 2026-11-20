@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="kpv_tile_label">KartoshkaVPN</string>
+    <string name="kpv_shortcut_short">VPN</string>
+    <string name="kpv_shortcut_long">Подключить или отключить KartoshkaVPN</string>
+</resources>

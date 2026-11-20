@@ -7,10 +7,10 @@ plugins {
 
 android {
     namespace = "com.plugin.vpn"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
-        minSdk = 21
+        minSdk = 26
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")

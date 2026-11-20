@@ -52,4 +52,32 @@ impl<R: Runtime> Vpn<R> {
       .run_mobile_plugin("status", ())
       .map_err(Into::into)
   }
+
+  pub fn android_connect(&self, payload: AndroidConnectRequest) -> crate::Result<TunnelStatus> {
+    self
+      .0
+      .run_mobile_plugin("connect", payload)
+      .map_err(Into::into)
+  }
+
+  pub fn android_disconnect(&self) -> crate::Result<TunnelStatus> {
+    self
+      .0
+      .run_mobile_plugin("disconnect", ())
+      .map_err(Into::into)
+  }
+
+  pub fn android_apps(&self) -> crate::Result<AndroidAppsResponse> {
+    self
+      .0
+      .run_mobile_plugin("listApps", ())
+      .map_err(Into::into)
+  }
+
+  pub fn notification_permission(&self) -> crate::Result<NotificationPermission> {
+    self
+      .0
+      .run_mobile_plugin("requestNotificationPermission", ())
+      .map_err(Into::into)
+  }
 }

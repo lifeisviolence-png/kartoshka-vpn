@@ -1,11 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { t } from './i18n.js';
+import { androidBridge } from './android-bridge.js';
 
 const isDesktop = Boolean(window.__TAURI_INTERNALS__);
+const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
 const directScheme = /^(vless|vmess|trojan|ss|hysteria2):\/\//i;
 
-export const desktopBridge = {
+const desktopNative = {
   async connect({ config, debug = false }) {
     if (!isDesktop) return { ok: false, demo: true, error: t('bridge.previewProxy') };
     const warning = await invoke('start_proxy', { configJson: JSON.stringify(config), debug: Boolean(debug) });
@@ -139,6 +141,13 @@ export const desktopBridge = {
     return () => stops.forEach((stop) => stop());
   },
   getCapabilities() {
-    return { systemProxy: isDesktop, subscriptionImport: true, geofiles: false, native: isDesktop };
+    return { systemProxy: isDesktop, subscriptionImport: true, geofiles: false, native: isDesktop, android: false };
   }
 };
+
+// A single interface for the UI: the desktop implementation talks to the Rust
+// core, the Android implementation talks to tauri-plugin-vpn. Keeping the
+// facade here means main.js does not branch on the platform.
+export const desktopBridge = isAndroid
+  ? { ...desktopNative, ...androidBridge }
+  : desktopNative;
