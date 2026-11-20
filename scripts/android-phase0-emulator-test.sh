@@ -22,7 +22,42 @@ LOGCAT="/tmp/kpv-logcat.txt"
 
 test -f "$APK"
 
-timeout 600 adb install -r "$APK"
+PID_8080=""
+PID_8081=""
+cleanup() {
+  timeout 30 adb logcat -d -s KPV_PHASE0:* >"$LOGCAT" 2>&1 || true
+  if [ -n "$PID_8080" ]; then kill "$PID_8080" 2>/dev/null || true; fi
+  if [ -n "$PID_8081" ]; then kill "$PID_8081" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+
+timeout 120 adb wait-for-device
+# TCG can report boot_completed before PackageManager is ready. Wait for a
+# real package-manager round trip, then give the emulator a short settle.
+for _ in $(seq 1 60); do
+  if timeout 30 adb shell cmd package list packages >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+sleep 20
+
+installed=0
+for attempt in 1 2 3; do
+  echo "adb install attempt $attempt"
+  if timeout 300 adb install --no-streaming -r -g "$APK"; then
+    installed=1
+    break
+  fi
+  echo "adb install attempt $attempt failed; retrying"
+  sleep 20
+done
+if [ "$installed" != 1 ]; then
+  echo 'ERROR: adb install failed after retries'
+  timeout 30 adb shell df -h || true
+  exit 1
+fi
+timeout 30 adb shell pm path "$PKG"
 timeout 30 adb shell appops set "$PKG" ACTIVATE_VPN allow
 timeout 30 adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || true
 
@@ -30,11 +65,6 @@ python3 -m http.server 8080 --bind 0.0.0.0 >"$LOG_8080" 2>&1 &
 PID_8080=$!
 python3 -m http.server 8081 --bind 0.0.0.0 >"$LOG_8081" 2>&1 &
 PID_8081=$!
-cleanup() {
-  timeout 30 adb logcat -d -s KPV_PHASE0:* >"$LOGCAT" 2>&1 || true
-  kill "$PID_8080" "$PID_8081" 2>/dev/null || true
-}
-trap cleanup EXIT
 
 timeout 30 adb logcat -c
 timeout 300 adb shell am start -W -n "$ACTIVITY" || true

@@ -172,6 +172,7 @@ CI также проверяет наличие `libgojni.so` и `libkartoshka_v
 | `44705873986` | `adb install` | `android-emulator-runner` выполняет строки `script` по одной, переменная `APK` не сохранялась между строками |
 | `44709119808` | запуск Xray | `tunnel started fd=204`, затем `bad file descriptor`: AOSP `closeDescriptors()` закрыл fd перед `exec` |
 | `44716801743` | сборка TUN inbound | пустое `name` вызвало `net.Interfaces()`; Android запретил `NETLINK_ROUTE`: `netlinkrib: permission denied` |
+| `44721901490` | `adb install` | PackageManager ещё не был готов: `Failure calling service package: Broken pipe (32)`; добавлены ожидание `pm`, `--no-streaming` и три попытки |
 | `[новый прогон после исправления]` | — | ожидается после push ветки |
 
 После `44709119808` вариант с binary + `ProcessBuilder` признан негодным для
