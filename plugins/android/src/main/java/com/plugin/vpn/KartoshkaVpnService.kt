@@ -108,7 +108,6 @@ class KartoshkaVpnService : VpnService() {
     private var restarting = false
     private var restartAttempts = 0
     private var lastBundleJson: String? = null
-    private var lastConfigJson: String? = null
     private var underlyingNetwork: Network? = null
     private var connectivity: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -201,36 +200,8 @@ class KartoshkaVpnService : VpnService() {
         }
         lastError = null
         try {
-            val bundle = JSONObject(bundleJson)
-            val configJson = bundle.optString("config")
-            if (configJson.isBlank()) error("empty Xray configuration")
-            val xrayConfig = JSONObject(configJson)
-            val mtu = xrayConfig.optJSONArray("inbounds")
-                ?.optJSONObject(0)
-                ?.optJSONObject("settings")
-                ?.optInt("mtu", 1500)
-                ?.coerceIn(1280, 1500) ?: 1500
-
-            val builder = Builder()
-                .setSession("KartoshkaVPN")
-                .setMtu(mtu)
-                .addAddress("10.8.0.2", 32)
-                .addRoute("0.0.0.0", 0)
-                .addAddress("fd00::2", 128)
-                .addRoute("::", 0)
-                .addDnsServer("1.1.1.1")
-                .addDnsServer("2606:4700:4700::1111")
-                .setBlocking(true)
-
-            applySplitTunnelling(builder, bundle)
-            if (bundle.optBoolean("localNetwork", false)) addLocalNetworkExclusions(builder)
-
-            val pfd = builder.establish() ?: error("VpnService.establish() returned null")
+            val (pfd, xrayConfig) = establishTun(bundleJson)
             tun = pfd
-            lastBundleJson = bundleJson
-            lastConfigJson = configJson
-            activeCountry = bundle.optString("country").ifBlank { null }
-            activeNodeLabel = bundle.optString("nodeLabel").ifBlank { null }
 
             if (!startCore(xrayConfig, pfd)) error(lastError ?: "runXray failed")
             running = true
@@ -249,6 +220,44 @@ class KartoshkaVpnService : VpnService() {
             Log.e(TAG, "tunnel start failed: $lastError", error)
             stopTunnelInternal(notifyProblem = true)
         }
+    }
+
+    /**
+     * Creates a fresh TUN interface from the saved bundle. libXray owns the
+     * fd while the core runs and closes it when the core stops, so a core
+     * restart must establish a new interface instead of reusing the old fd.
+     */
+    @Synchronized
+    private fun establishTun(bundleJson: String): Pair<ParcelFileDescriptor, JSONObject> {
+        val bundle = JSONObject(bundleJson)
+        val configJson = bundle.optString("config")
+        if (configJson.isBlank()) error("empty Xray configuration")
+        val xrayConfig = JSONObject(configJson)
+        val mtu = xrayConfig.optJSONArray("inbounds")
+            ?.optJSONObject(0)
+            ?.optJSONObject("settings")
+            ?.optInt("mtu", 1500)
+            ?.coerceIn(1280, 1500) ?: 1500
+
+        val builder = Builder()
+            .setSession("KartoshkaVPN")
+            .setMtu(mtu)
+            .addAddress("10.8.0.2", 32)
+            .addRoute("0.0.0.0", 0)
+            .addAddress("fd00::2", 128)
+            .addRoute("::", 0)
+            .addDnsServer("1.1.1.1")
+            .addDnsServer("2606:4700:4700::1111")
+            .setBlocking(true)
+
+        applySplitTunnelling(builder, bundle)
+        if (bundle.optBoolean("localNetwork", false)) addLocalNetworkExclusions(builder)
+
+        val pfd = builder.establish() ?: error("VpnService.establish() returned null")
+        lastBundleJson = bundleJson
+        activeCountry = bundle.optString("country").ifBlank { null }
+        activeNodeLabel = bundle.optString("nodeLabel").ifBlank { null }
+        return pfd to xrayConfig
     }
 
     private fun applySplitTunnelling(builder: Builder, bundle: JSONObject) {
@@ -351,9 +360,14 @@ class KartoshkaVpnService : VpnService() {
                 restartAttempts += 1
                 Log.i(TAG, "restarting core ($reason), attempt $restartAttempts")
                 stopCore()
-                val pfd = tun ?: error("TUN is gone")
-                val configJson = lastConfigJson ?: error("configuration is gone")
-                if (!startCore(JSONObject(configJson), pfd)) error(lastError ?: "runXray failed")
+                val bundleJson = lastBundleJson ?: error("configuration is gone")
+                try {
+                    tun?.close()
+                } catch (_: Throwable) {
+                }
+                val (pfd, xrayConfig) = establishTun(bundleJson)
+                tun = pfd
+                if (!startCore(xrayConfig, pfd)) error(lastError ?: "runXray failed")
                 updateNotification("Подключено", activeCountry)
                 Log.i(TAG, "core restarted: ${xrayRunning()}")
                 // Three attempts are a budget for one failure episode, not for
@@ -388,8 +402,11 @@ class KartoshkaVpnService : VpnService() {
                     underlyingNetwork = network
                     setUnderlyingNetworks(arrayOf(network))
                     if (previous != null && previous != network && running) {
-                        Log.i(TAG, "underlying network changed")
-                        handler.postDelayed({ restartCore("network change") }, 1_500)
+                        // Keep the existing TUN and core. Android routes new
+                        // outbound sockets through the updated underlying
+                        // network; tearing down the core here would close the
+                        // libXray-owned TUN fd and leave the interface gone.
+                        Log.i(TAG, "underlying network changed; core kept running")
                     }
                 }
 

@@ -25,20 +25,23 @@ class KpvTestStartActivity : Activity() {
             return
         }
 
-        // establish() returns null until the package is authorized. The
-        // emulator test grants ACTIVATE_VPN, but prepare() is still the
-        // documented way to make that authorization visible to VpnService.
-        val consent = VpnService.prepare(this)
-        if (consent != null) {
-            Log.i("KPV_PHASE1", "VPN consent dialog requested")
-            startActivity(consent)
-            finish()
-            return
+        val stopping = intent.getBooleanExtra("stop", false)
+        if (!stopping) {
+            // establish() returns null until the package is authorized. The
+            // emulator test grants ACTIVATE_VPN, but prepare() is still the
+            // documented way to make that authorization visible to VpnService.
+            val consent = VpnService.prepare(this)
+            if (consent != null) {
+                Log.i("KPV_PHASE1", "VPN consent dialog requested")
+                startActivity(consent)
+                finish()
+                return
+            }
         }
 
         val service = Intent(this, KartoshkaVpnService::class.java)
         when {
-            intent.getBooleanExtra("stop", false) -> {
+            stopping -> {
                 service.action = KartoshkaVpnService.ACTION_STOP
                 startService(service)
             }
