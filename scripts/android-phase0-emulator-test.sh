@@ -141,7 +141,10 @@ if grep -q 'GET /' "$LOG_8080"; then
   exit 1
 fi
 test -s "$RESPONSE"
-grep -q 'Directory listing' "$RESPONSE"
+# The Python server runs from the repository root, so it returns the built
+# index.html instead of a directory listing. What matters for the TUN proof is
+# a complete HTTP 200 response that came back through Xray.
+grep -q 'HTTP/1.0 200 OK' "$RESPONSE"
 
 echo '--- service checks ---'
 if ! timeout 60 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'; then
