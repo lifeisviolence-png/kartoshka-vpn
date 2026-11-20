@@ -173,7 +173,12 @@ timeout 30 adb shell ip route get 1.1.1.1 | grep -q 'dev tun0'
 timeout 30 adb shell ip -6 route get 2606:4700:4700::1111 | grep -q 'dev tun0'
 
 echo '--- no listening TCP sockets owned by the app ---'
-APP_UID="$(timeout 30 adb shell dumpsys package "$PKG" | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1 | tr -d '\r')"
+APP_UID="$(timeout 30 adb shell cmd package list packages -U "$PKG" 2>/dev/null \
+  | tr -d '\r' | sed -n 's/.*uid:\([0-9]*\).*/\1/p' | head -1)"
+if [ -z "$APP_UID" ]; then
+  APP_UID="$(timeout 30 adb shell dumpsys package "$PKG" 2>/dev/null \
+    | tr -d '\r' | sed -n 's/.*userId=\([0-9]*\).*/\1/p' | head -1)"
+fi
 if [ -z "$APP_UID" ]; then echo 'ERROR: cannot read app uid'; exit 1; fi
 LISTENERS="$(timeout 30 adb shell 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' | awk -v uid="$APP_UID" '$8 == uid && $4 == "0A" {print}')"
 if [ -n "$LISTENERS" ]; then
