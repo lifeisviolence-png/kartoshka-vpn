@@ -102,5 +102,8 @@ jobs:
             /tmp/kpv-http-8080.log
             /tmp/kpv-http-8081.log
             /tmp/kpv-response.txt
+            /tmp/kpv-client.err
             /tmp/kpv-logcat.txt
+            /tmp/kpv-network.txt
+            /tmp/kpv-xray-access.log
           if-no-files-found: warn

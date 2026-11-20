@@ -13,6 +13,7 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import libXray.LibXray
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Phase 0 spike service. It deliberately contains only the minimum needed to
@@ -143,6 +144,13 @@ class KartoshkaVpnService : VpnService() {
             Log.i(TAG, "xray version: ${xrayVersion()}")
             val xrayConfig = JSONObject(configJson)
             xrayConfig.put("env", JSONObject().put("xray.tun.fd", pfd.fd.toString()))
+            // Phase 0 diagnostic only: keep Xray's access log inside the app
+            // sandbox so CI can prove that the TUN inbound accepted a
+            // connection. Production configurations must not log destinations.
+            xrayConfig.optJSONObject("log")?.put(
+                "access",
+                File(filesDir, "access.log").absolutePath
+            )
             val request = JSONObject()
                 .put("apiVersion", 3)
                 .put("method", "runXray")

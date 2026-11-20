@@ -18,7 +18,11 @@ APK="src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-d
 LOG_8080="/tmp/kpv-http-8080.log"
 LOG_8081="/tmp/kpv-http-8081.log"
 RESPONSE="/tmp/kpv-response.txt"
+CLIENT_ERR="/tmp/kpv-client.err"
 LOGCAT="/tmp/kpv-logcat.txt"
+NETWORK="/tmp/kpv-network.txt"
+ACCESS="/tmp/kpv-xray-access.log"
+CLIENT="/data/local/tmp/kpv-http-client.sh"
 
 test -f "$APK"
 
@@ -26,6 +30,9 @@ PID_8080=""
 PID_8081=""
 cleanup() {
   timeout 30 adb logcat -d -s KPV_PHASE0:* >"$LOGCAT" 2>&1 || true
+  timeout 30 adb shell ip addr >"$NETWORK" 2>&1 || true
+  timeout 30 adb shell ip route >>"$NETWORK" 2>&1 || true
+  timeout 30 adb shell run-as "$PKG" cat files/access.log >"$ACCESS" 2>&1 || true
   if [ -n "$PID_8080" ]; then kill "$PID_8080" 2>/dev/null || true; fi
   if [ -n "$PID_8081" ]; then kill "$PID_8081" 2>/dev/null || true; fi
 }
@@ -61,10 +68,16 @@ timeout 30 adb shell pm path "$PKG"
 timeout 30 adb shell appops set "$PKG" ACTIVATE_VPN allow
 timeout 30 adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || true
 
-python3 -m http.server 8080 --bind 0.0.0.0 >"$LOG_8080" 2>&1 &
+# -u is required: the test reads these logs while the servers are still
+# running. Without it Python block-buffers stdout and a successful request
+# would look like an empty log until the process exits.
+python3 -u -m http.server 8080 --bind 0.0.0.0 >"$LOG_8080" 2>&1 &
 PID_8080=$!
-python3 -m http.server 8081 --bind 0.0.0.0 >"$LOG_8081" 2>&1 &
+python3 -u -m http.server 8081 --bind 0.0.0.0 >"$LOG_8081" 2>&1 &
 PID_8081=$!
+
+adb push scripts/android-phase0-http-client.sh "$CLIENT" >/dev/null
+adb shell chmod 755 "$CLIENT"
 
 timeout 30 adb logcat -c
 timeout 300 adb shell am start -W -n "$ACTIVITY" || true
@@ -85,17 +98,31 @@ timeout 30 adb logcat -d -s KPV_PHASE0:* | grep -q 'xray state: true'
 timeout 60 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'
 timeout 30 adb shell ps -A | grep -q "$PKG"
 
+echo '--- network state ---'
+timeout 30 adb shell ip addr || true
+timeout 30 adb shell ip route || true
+
 echo '--- traffic through TUN ---'
 set +e
-timeout 90 adb shell "toybox wget -qO- http://10.0.2.2:8080/ 2>/dev/null || printf 'GET / HTTP/1.0\r\nHost: 10.0.2.2\r\n\r\n' | toybox nc 10.0.2.2 8080" >"$RESPONSE"
+timeout 90 adb shell sh "$CLIENT" >"$RESPONSE" 2>"$CLIENT_ERR"
 CLIENT_RC=$?
 set -e
 echo "client exit=$CLIENT_RC"
+cat "$CLIENT_ERR" || true
 head -20 "$RESPONSE" || true
 
 # The redirected request must reach 8081. If it reaches 8080, the TUN was
 # bypassed and the test must fail rather than report a false positive.
-grep -q 'GET /' "$LOG_8081"
+if ! grep -q 'GET /' "$LOG_8081"; then
+  echo 'ERROR: request did not reach 8081 through Xray'
+  echo '--- 8081 log ---'
+  cat "$LOG_8081" || true
+  echo '--- 8080 log ---'
+  cat "$LOG_8080" || true
+  echo '--- response size ---'
+  wc -c "$RESPONSE" || true
+  exit 1
+fi
 if grep -q 'GET /' "$LOG_8080"; then
   echo 'ERROR: request reached 8080 directly; TUN/Xray was bypassed'
   exit 1
