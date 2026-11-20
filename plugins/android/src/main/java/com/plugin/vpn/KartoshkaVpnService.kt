@@ -270,7 +270,11 @@ class KartoshkaVpnService : VpnService() {
             {
               "tag": "test-out",
               "protocol": "freedom",
-              "settings": { "redirect": "10.0.2.2:8081" }
+              // The emulator can boot without an underlying Wi-Fi/eth0
+              // network. The CI harness publishes host port 8081 with
+              // `adb reverse`, so the test outbound uses loopback and does
+              // not depend on the emulator's NAT being ready.
+              "settings": { "redirect": "127.0.0.1:8081" }
             }
           ]
         }

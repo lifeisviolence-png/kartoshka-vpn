@@ -6,8 +6,9 @@
 #   - the official XTLS/libXray Android library must load and report its version;
 #   - VpnService must create a TUN and pass its fd to the in-process Xray core;
 #   - the HTTP request is sent to 10.0.2.2:8080, but Xray's freedom outbound
-#     redirects it to 10.0.2.2:8081. A request that bypasses the TUN reaches
-#     8080 directly and fails the test;
+#     redirects it to 127.0.0.1:8081, which `adb reverse` publishes from the
+#     host. A request that bypasses the TUN reaches 8080 directly and fails
+#     the test;
 #   - the service and the in-process Xray state must survive the Activity
 #     going Home.
 set -euo pipefail
@@ -34,6 +35,7 @@ cleanup() {
   timeout 30 adb shell ip addr >"$NETWORK" 2>&1 || true
   timeout 30 adb shell ip route >>"$NETWORK" 2>&1 || true
   timeout 30 adb shell run-as "$PKG" cat files/access.log >"$ACCESS" 2>&1 || true
+  timeout 30 adb reverse --remove tcp:8081 >/dev/null 2>&1 || true
   if [ -n "$PID_8080" ]; then kill "$PID_8080" 2>/dev/null || true; fi
   if [ -n "$PID_8081" ]; then kill "$PID_8081" 2>/dev/null || true; fi
 }
@@ -74,8 +76,12 @@ timeout 30 adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || tr
 # would look like an empty log until the process exits.
 python3 -u -m http.server 8080 --bind 0.0.0.0 >"$LOG_8080" 2>&1 &
 PID_8080=$!
-python3 -u -m http.server 8081 --bind 0.0.0.0 >"$LOG_8081" 2>&1 &
+python3 -u -m http.server 8081 --bind 127.0.0.1 >"$LOG_8081" 2>&1 &
 PID_8081=$!
+
+# The emulator may have no working Wi-Fi/eth0 route after a TCG boot. Publish
+# the host's 8081 on the device loopback instead of relying on 10.0.2.2 NAT.
+timeout 30 adb reverse tcp:8081 tcp:8081
 
 adb push scripts/android-phase0-http-client.sh "$CLIENT" >/dev/null
 adb shell chmod 755 "$CLIENT"

@@ -2,8 +2,9 @@
 # Minimal HTTP client for the Phase 0 emulator proof. It runs inside the
 # emulator as the shell UID, so its traffic is routed through the VpnService
 # TUN. The request is sent to 10.0.2.2:8080; Xray's test outbound redirects it
-# to 10.0.2.2:8081. Keeping stdin open for a few seconds makes toybox nc wait
-# for the response instead of closing the socket immediately.
+# to 127.0.0.1:8081, published by `adb reverse`. Keeping stdin open for a few
+# seconds makes toybox nc wait for the response instead of closing the socket
+# immediately.
 set -u
 
 HOST="10.0.2.2"
