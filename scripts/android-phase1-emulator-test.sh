@@ -227,14 +227,21 @@ if [ "$MODE" = "full" ]; then
   timeout 30 adb shell ps -A | grep -q "$PKG"
 
   echo '--- always-on null-intent restart from encrypted bundle ---'
-  timeout 30 adb shell am force-stop "$PKG"
+  # Clear the buffer so the wait below cannot be satisfied by the first
+  # tunnel-start line from before force-stop.
+  timeout 30 adb logcat -c || true
+  timeout 30 adb shell am force-stop "$PKG" || true
   sleep 2
   timeout 60 adb shell "am start -n $PKG/com.plugin.vpn.KpvTestStartActivity --ez nullStart true" || true
   for _ in $(seq 1 120); do
-    if timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'tunnel started fd='; then break; fi
+    if timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'tunnel started fd=' \
+      && timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'xray state: true'; then
+      break
+    fi
     sleep 2
   done
   timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'tunnel started fd='
+  timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'xray state: true'
   timeout 30 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'
 fi
 
