@@ -82,15 +82,48 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -E "package:|sdkVersion|targetSdkVersion"
 
       - name: Emulator spike (x86_64 API 34, TCG)
-        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
-        with:
-          api-level: 34
-          target: google_apis
-          arch: x86_64
-          profile: pixel_6
-          emulator-boot-timeout: 1800
-          disable-animations: true
-          script: bash scripts/android-phase0-emulator-test.sh
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          # Do not use ReactiveCircus/android-emulator-runner here. After
+          # sys.boot_completed it unconditionally runs `input keyevent 82` and
+          # animation settings; on an unaccelerated TCG boot those system
+          # services can still answer with "Broken pipe" and the action aborts
+          # before our test script runs. Starting the emulator ourselves lets
+          # us wait for PackageManager and InputManager explicitly.
+          echo no | avdmanager create avd \
+            -n kpv-api34 \
+            -k "system-images;android-34;google_apis;x86_64" \
+            -d pixel_6 \
+            --force
+          emulator -avd kpv-api34 \
+            -no-window -no-audio -no-boot-anim \
+            -gpu swiftshader_indirect \
+            -no-snapshot -accel off -memory 2048 \
+            >/tmp/kpv-emulator.log 2>&1 &
+          echo $! >/tmp/kpv-emulator.pid
+          timeout 300 adb wait-for-device
+          ready=0
+          for _ in $(seq 1 180); do
+            boot="$(timeout 30 adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+            pm="$(timeout 30 adb shell cmd package list packages 2>/dev/null | head -1 || true)"
+            input="$(timeout 30 adb shell input keyevent 82 2>&1 || true)"
+            if [ "$boot" = "1" ] \
+              && printf '%s' "$pm" | grep -q '^package:' \
+              && ! printf '%s' "$input" | grep -qE "Broken pipe|Can't find service"; then
+              ready=1
+              echo "emulator services ready after $((_ * 5))s"
+              break
+            fi
+            sleep 5
+          done
+          if [ "$ready" != 1 ]; then
+            echo 'ERROR: emulator services did not become ready'
+            tail -100 /tmp/kpv-emulator.log || true
+            exit 1
+          fi
+          timeout 30 adb shell wm dismiss-keyguard || true
+          bash scripts/android-phase0-emulator-test.sh
 
       - name: Upload APK and logs
         if: always()
@@ -106,4 +139,5 @@ jobs:
             /tmp/kpv-logcat.txt
             /tmp/kpv-network.txt
             /tmp/kpv-xray-access.log
+            /tmp/kpv-emulator.log
           if-no-files-found: warn
