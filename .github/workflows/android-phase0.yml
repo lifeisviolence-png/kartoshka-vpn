@@ -20,6 +20,10 @@ jobs:
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      # GitHub-hosted ubuntu-latest has no /dev/kvm. Emulator 37 refuses
+      # "-accel off" unless TCG is explicitly allowed; this keeps the same
+      # x86_64 API 34 image and the same functional assertions.
+      ANDROID_I_WANT_MY_TCG: "yes"
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -84,6 +88,7 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_6
+          emulator-boot-timeout: 1800
           disable-animations: true
           script: |
             set -euo pipefail
