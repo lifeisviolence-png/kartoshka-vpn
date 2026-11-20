@@ -68,6 +68,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [x86_64, arm64-v8a]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
@@ -87,13 +91,13 @@ jobs:
             "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.12077973"
       - name: Add Rust Android target
         run: |
-          rustup target add x86_64-linux-android
+          rustup target add x86_64-linux-android aarch64-linux-android
           cargo install cargo-ndk --locked
       - run: pnpm install --frozen-lockfile
       - name: Prepare and debug-sign the CI release variant
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          scripts/android-phase0-prepare.sh x86_64
+          scripts/android-phase0-prepare.sh ${{ matrix.abi }}
           python3 - <<'PY'
           from pathlib import Path
           p = Path("src-tauri/gen/android/app/build.gradle.kts")
@@ -111,11 +115,12 @@ jobs:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          pnpm tauri android build --apk -t x86_64 --ci
+          pnpm tauri android build --apk -t ${{ matrix.abi }} --ci
       - name: Measure sizes and check 16KB alignment
         run: |
           APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' | head -1)
           test -n "$APK"
+          echo "ABI=${{ matrix.abi }}"
           echo "APK=$APK"
           stat -c 'APK_BYTES=%s' "$APK"
           sha256sum "$APK"
@@ -123,7 +128,7 @@ jobs:
           bash scripts/check-16kb.sh "$APK" | tee /tmp/kpv-16kb.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: android-phase1-release-size
+          name: android-phase1-release-size-${{ matrix.abi }}
           path: |
             src-tauri/gen/android/app/build/outputs/apk/**/*.apk
             /tmp/kpv-16kb.txt
@@ -155,6 +160,11 @@ jobs:
             "platform-tools" \
             "emulator" \
             "system-images;android-${{ matrix.api }};google_apis;x86_64"
+      - name: Enable KVM for the emulator
+        run: |
+          ls -l /dev/kvm || true
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+          "$ANDROID_HOME/emulator/emulator" -accel-check || true
       - name: Run emulator test
         env:
           KPV_API_LEVEL: ${{ matrix.api }}
@@ -175,7 +185,7 @@ jobs:
           emulator -avd "kpv-api${{ matrix.api }}" \
             -no-window -no-audio -no-boot-anim \
             -gpu swiftshader_indirect \
-            -no-snapshot -accel auto -memory 2048 \
+            -no-snapshot -no-metrics -accel auto -memory 2048 \
             >/tmp/kpv-emulator.log 2>&1 &
           timeout 300 adb wait-for-device
           ready=0
