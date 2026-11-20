@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Phase 1 Android emulator test.
 #
-# Full mode (API 34): consent-free explicit start, TUN traffic through Xray,
+# Full mode (API 34): explicit debug-only start, TUN traffic through Xray,
 # no listening TCP sockets, IPv4/IPv6 routes, notification without the node
 # name, Home survival and a null-intent (always-on) restart from the encrypted
 # bundle.
@@ -90,8 +90,9 @@ adb shell chmod 755 "$CLIENT"
 timeout 30 adb logcat -c
 timeout 60 adb shell am start -n "$ACTIVITY" || true
 sleep 8
-# Explicit start with a real config. No auto-start exists in VpnPlugin.load().
-timeout 60 adb shell "am start-foreground-service -n $PKG/com.plugin.vpn.KartoshkaVpnService -a com.plugin.vpn.action.START --es config '$CONFIG'" || true
+# The production service is not exported. The debug-only test activity is the
+# only way for adb to request an explicit start; it refuses to run in release.
+timeout 60 adb shell "am start -n $PKG/com.plugin.vpn.KpvTestStartActivity --es config '$CONFIG'" || true
 
 for _ in $(seq 1 120); do
   if timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'tunnel started fd='; then break; fi
@@ -161,7 +162,7 @@ if [ "$MODE" = "full" ]; then
   echo '--- always-on null-intent restart from encrypted bundle ---'
   timeout 30 adb shell am force-stop "$PKG"
   sleep 2
-  timeout 60 adb shell am start-foreground-service -n "$PKG/com.plugin.vpn.KartoshkaVpnService" || true
+  timeout 60 adb shell "am start -n $PKG/com.plugin.vpn.KpvTestStartActivity --ez nullStart true" || true
   for _ in $(seq 1 120); do
     if timeout 30 adb logcat -d -s KPV_PHASE1:* | grep -q 'tunnel started fd='; then break; fi
     sleep 2
@@ -171,7 +172,7 @@ if [ "$MODE" = "full" ]; then
 fi
 
 echo '--- explicit stop ---'
-timeout 30 adb shell "am startservice -n $PKG/com.plugin.vpn.KartoshkaVpnService -a com.plugin.vpn.action.STOP" || true
+timeout 30 adb shell "am start -n $PKG/com.plugin.vpn.KpvTestStartActivity --ez stop true" || true
 sleep 3
 if timeout 30 adb shell dumpsys activity services "$PKG" | grep -q 'KartoshkaVpnService'; then
   echo 'ERROR: service is still running after explicit stop'

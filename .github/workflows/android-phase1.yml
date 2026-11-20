@@ -71,7 +71,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        abi: [x86_64, arm64-v8a]
+        include:
+          - abi: x86_64
+            tauri_target: x86_64
+          - abi: arm64-v8a
+            tauri_target: aarch64
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
@@ -115,7 +119,7 @@ jobs:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: "s"
         run: |
           export NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          pnpm tauri android build --apk -t ${{ matrix.abi }} --ci
+          pnpm tauri android build --apk -t ${{ matrix.tauri_target }} --ci
       - name: Measure sizes and check 16KB alignment
         run: |
           APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' | head -1)
