@@ -81,7 +81,7 @@ jobs:
           unzip -l "$APK" | grep -E 'lib/x86_64/(libxray|libkartoshka_vpn_lib)\.so'
           "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -E "package:|sdkVersion|targetSdkVersion"
 
-      - name: Emulator spike
+      - name: Emulator spike (x86_64 API 34, TCG)
         uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: 34
@@ -90,34 +90,7 @@ jobs:
           profile: pixel_6
           emulator-boot-timeout: 1800
           disable-animations: true
-          script: |
-            set -euo pipefail
-            APK=src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
-            adb install -r "$APK"
-            adb shell appops set ru.kartoshka.vpn ACTIVATE_VPN allow
-            adb shell pm grant ru.kartoshka.vpn android.permission.POST_NOTIFICATIONS || true
-            python3 -m http.server 8080 --bind 0.0.0.0 >/tmp/kpv-http.log 2>&1 &
-            HTTP_PID=$!
-            trap 'kill $HTTP_PID 2>/dev/null || true' EXIT
-            adb logcat -c
-            adb shell am start -n ru.kartoshka.vpn/.MainActivity
-            sleep 25
-            echo '--- phase0 logcat ---'
-            adb logcat -d -s KPV_PHASE0:* | tail -80
-            adb logcat -d -s KPV_PHASE0:* | grep -q 'xray version:'
-            adb logcat -d -s KPV_PHASE0:* | grep -q 'tunnel started fd='
-            adb shell dumpsys activity services ru.kartoshka.vpn | grep -q 'KartoshkaVpnService'
-            adb shell ps -A | grep -E 'libxray|xray' || true
-            echo '--- traffic through TUN ---'
-            adb shell "toybox wget -qO- http://10.0.2.2:8080/ 2>/dev/null || echo -e 'GET / HTTP/1.0\r\nHost: 10.0.2.2\r\n\r\n' | toybox nc 10.0.2.2 8080" > /tmp/kpv-response.txt || true
-            cat /tmp/kpv-response.txt | head -20
-            grep -q 'GET / HTTP/1.0' /tmp/kpv-http.log
-            echo '--- activity close check ---'
-            adb shell input keyevent 3
-            sleep 4
-            adb shell dumpsys activity services ru.kartoshka.vpn | grep -q 'KartoshkaVpnService'
-            adb shell ps -A | grep -E 'libxray|xray'
-            echo 'PHASE0_EMULATOR_OK'
+          script: bash scripts/android-phase0-emulator-test.sh
 
       - name: Upload APK and logs
         if: always()
@@ -126,6 +99,7 @@ jobs:
           name: android-phase0-x86_64
           path: |
             src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
-            /tmp/kpv-http.log
+            /tmp/kpv-http-8080.log
+            /tmp/kpv-http-8081.log
             /tmp/kpv-response.txt
           if-no-files-found: warn

@@ -219,7 +219,7 @@ class KartoshkaVpnService : VpnService() {
 
     private val DEFAULT_CONFIG = """
         {
-          "log": { "loglevel": "warning" },
+          "log": { "logLevel": "info", "access": "" },
           "inbounds": [
             {
               "tag": "tun-in",
@@ -228,7 +228,11 @@ class KartoshkaVpnService : VpnService() {
             }
           ],
           "outbounds": [
-            { "tag": "direct", "protocol": "freedom" }
+            {
+              "tag": "test-out",
+              "protocol": "freedom",
+              "settings": { "redirect": "10.0.2.2:8081" }
+            }
           ]
         }
     """.trimIndent()
