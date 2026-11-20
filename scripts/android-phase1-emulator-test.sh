@@ -190,8 +190,11 @@ echo "no listeners for uid $APP_UID"
 
 echo '--- notification ---'
 NOTIF="$(timeout 30 adb shell dumpsys notification --noredact 2>/dev/null || true)"
-printf '%s' "$NOTIF" | grep -q 'KartoshkaVPN'
-if printf '%s' "$NOTIF" | grep -q 'Secret Node'; then
+if ! grep -q 'KartoshkaVPN' <<<"$NOTIF"; then
+  echo 'ERROR: VPN notification is missing'
+  exit 1
+fi
+if grep -q 'Secret Node' <<<"$NOTIF"; then
   echo 'ERROR: node name leaked into the notification'
   exit 1
 fi
