@@ -6,11 +6,16 @@ authors = ["КартошкаVPN"]
 edition = "2021"
 build = "build.rs"
 
+[lib]
+name = "kartoshka_vpn_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
-tauri-build = { version = "2" }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-vpn = { path = "../plugins" }
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
 regex = "1"
